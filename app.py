@@ -81,25 +81,36 @@ def format_percent_brl(value: float) -> str:
 
 def cancelar_solicitacao(solicitacao_id, usuario_id):
     compra = query("""
-    select c.id, c.valor_compra, s.rubrica_id
+    select c.id
     from compras c
     join solicitacoes_compra s on s.id = c.solicitacao_id
     where c.solicitacao_id=%s
     """, (solicitacao_id,))
     if len(compra) == 1:
         compra_id = int(compra.iloc[0]["id"])
-        valor_compra = Decimal(str(compra.iloc[0]["valor_compra"]))
-        rubrica_id = int(compra.iloc[0]["rubrica_id"])
         execute("delete from notas_fiscais where compra_id=%s", (compra_id,))
         execute("delete from compras where id=%s", (compra_id,))
-        execute("update rubricas set valor_utilizado = greatest(valor_utilizado - %s, 0) where id=%s", (valor_compra, rubrica_id))
 
     execute("update cotacoes set vencedora=false where solicitacao_id=%s", (solicitacao_id,))
     execute("update solicitacoes_compra set status='cancelado', autorizado=false, atualizado_em=now() where id=%s", (solicitacao_id,))
     execute("insert into historico_status (solicitacao_id,status_novo,usuario_id,observacao) values (%s,'cancelado',%s,'Solicitação cancelada')", (solicitacao_id, usuario_id))
 
+    sincronizar_orcamento()
+
 def sincronizar_orcamento():
-    execute("update rubricas set valor_utilizado = 0")
+    execute("update rubricas set valor_reservado = 0, valor_utilizado = 0")
+    execute("""
+    update rubricas r
+    set valor_reservado = totais.valor_total
+    from (
+        select rubrica_id, coalesce(sum(valor_estimado), 0) as valor_total
+        from solicitacoes_compra
+        where autorizado = true
+          and status in ('em_andamento', 'cotado', 'aguardando_nota')
+        group by rubrica_id
+    ) totais
+    where r.id = totais.rubrica_id
+    """)
     execute("""
     update rubricas r
     set valor_utilizado = totais.valor_total
@@ -107,7 +118,7 @@ def sincronizar_orcamento():
         select s.rubrica_id, coalesce(sum(c.valor_compra), 0) as valor_total
         from compras c
         join solicitacoes_compra s on s.id = c.solicitacao_id
-        where s.status <> 'cancelado'
+        where s.status = 'finalizado'
         group by s.rubrica_id
     ) totais
     where r.id = totais.rubrica_id
@@ -274,6 +285,7 @@ elif menu == "solicitacoes":
                 else:
                     execute("update solicitacoes_compra set autorizado=true, gerente_id=%s, autorizado_em=now(), status='em_andamento' where id=%s", (user["id"], sid))
                     execute("insert into historico_status (solicitacao_id,status_novo,usuario_id,observacao) values (%s,'em_andamento',%s,'Autorizada pelo gerente')", (sid, user["id"]))
+                    sincronizar_orcamento()
                     st.success("Solicitação autorizada.")
                     st.rerun()
             if st.button("Cancelar solicitação"):
@@ -358,7 +370,7 @@ elif menu == "compra_nota":
             if len(vencedoras) > 1:
                 st.error("Marque apenas uma cotação vencedora.")
 
-    if st.button("Registrar compra e debitar rubrica"):
+    if st.button("Registrar compra"):
         if cotacao_id is None:
             st.error("Marque uma cotação vencedora na tabela.")
         else:
@@ -367,15 +379,11 @@ elif menu == "compra_nota":
                 st.error("Cotação não encontrada para essa solicitação.")
             else:
                 valor = Decimal(str(df.iloc[0]["valor_total"]))
-                rubrica_id = int(df.iloc[0]["rubrica_id"])
-                compra_atual = query("select valor_compra from compras where solicitacao_id=%s", (sid,))
-                valor_anterior = Decimal(str(compra_atual.iloc[0]["valor_compra"])) if len(compra_atual) == 1 else Decimal("0")
-                diferenca = valor - valor_anterior
                 execute("update cotacoes set vencedora=false where solicitacao_id=%s", (sid,))
                 execute("update cotacoes set vencedora=true where id=%s", (cotacao_id,))
                 execute("insert into compras (solicitacao_id,cotacao_vencedora_id,valor_compra,comprador_id) values (%s,%s,%s,%s) on conflict (solicitacao_id) do update set cotacao_vencedora_id=excluded.cotacao_vencedora_id, valor_compra=excluded.valor_compra, comprador_id=excluded.comprador_id", (sid, cotacao_id, valor, user["id"]))
-                execute("update rubricas set valor_utilizado = greatest(valor_utilizado + %s, 0) where id=%s", (diferenca, rubrica_id))
                 execute("update solicitacoes_compra set status='aguardando_nota' where id=%s", (sid,))
+                sincronizar_orcamento()
                 st.success("Compra registrada. Orçamento atualizado e status: aguardando nota.")
 
     st.markdown("### Lançar nota fiscal")
@@ -399,6 +407,7 @@ elif menu == "compra_nota":
         if st.button("Consolidar nota e finalizar"):
             execute("insert into notas_fiscais (compra_id,numero_nf,fornecedor,valor_nf,data_emissao,lancado_por) values (%s,%s,%s,%s,%s,%s)", (compra_id, numero_nf, fornecedor_nf, valor_nf, data_nf, user["id"]))
             execute("update solicitacoes_compra set status='finalizado' where id=%s", (sid,))
+            sincronizar_orcamento()
             st.success("Nota fiscal lançada. Compra finalizada.")
 
 elif menu == "itens_comprados":
