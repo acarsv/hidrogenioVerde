@@ -73,6 +73,12 @@ def check_password(password: str, senha_hash: str) -> bool:
 def format_brl(value: float) -> str:
     return f"{value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
+def format_currency_brl(value: float) -> str:
+    return f"R$ {format_brl(float(value or 0))}"
+
+def format_percent_brl(value: float) -> str:
+    return f"{format_brl(float(value or 0))}%"
+
 def cancelar_solicitacao(solicitacao_id, usuario_id):
     compra = query("""
     select c.id, c.valor_compra, s.rubrica_id
@@ -194,11 +200,24 @@ if menu == "orcamento":
         st.success("Orçamento recalculado com base nas compras existentes.")
         st.rerun()
     df = query("select codigo,nome,tipo,valor_orcado,valor_reservado,valor_utilizado,saldo_disponivel,percentual_utilizado from vw_orcamento order by codigo")
-    st.dataframe(df, use_container_width=True)
+    df_orcamento = df.rename(columns={
+        "codigo": "Código",
+        "nome": "Nome",
+        "tipo": "Tipo",
+        "valor_orcado": "Valor orçado",
+        "valor_reservado": "Valor reservado",
+        "valor_utilizado": "Valor utilizado",
+        "saldo_disponivel": "Saldo disponível",
+        "percentual_utilizado": "Percentual utilizado",
+    })
+    for coluna in ["Valor orçado", "Valor reservado", "Valor utilizado", "Saldo disponível"]:
+        df_orcamento[coluna] = df_orcamento[coluna].apply(format_currency_brl)
+    df_orcamento["Percentual utilizado"] = df_orcamento["Percentual utilizado"].apply(format_percent_brl)
+    st.dataframe(df_orcamento, use_container_width=True, hide_index=True)
     c1, c2, c3 = st.columns(3)
-    c1.metric("Total orçado", f"R$ {df.valor_orcado.sum():,.2f}")
-    c2.metric("Total utilizado", f"R$ {df.valor_utilizado.sum():,.2f}")
-    c3.metric("Saldo disponível", f"R$ {df.saldo_disponivel.sum():,.2f}")
+    c1.metric("Total orçado", format_currency_brl(df.valor_orcado.sum()))
+    c2.metric("Total utilizado", format_currency_brl(df.valor_utilizado.sum()))
+    c3.metric("Saldo disponível", format_currency_brl(df.saldo_disponivel.sum()))
 
 elif menu == "nova_exigencia":
     rubricas = query("select id, codigo || ' - ' || nome as label from vw_orcamento order by codigo")
