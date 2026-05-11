@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 load_dotenv(override=True)
 st.set_page_config(page_title="Hidrogênio Verde - Compras", layout="wide")
-APP_DEPLOY_VERSION = "2026-05-11.1"
+APP_DEPLOY_VERSION = "2026-05-11.2"
 
 def get_conn():
     database_url = os.environ.get("DATABASE_URL")
@@ -296,6 +296,7 @@ with st.sidebar:
     else:
         st.write(f"Usuário: **{st.session_state.user['nome']}**")
         st.write(f"Papel: **{st.session_state.user['papel']}**")
+        st.caption(f"Versão: {APP_DEPLOY_VERSION}")
         if st.button("Sair"):
             st.session_state.user = None
             st.rerun()
