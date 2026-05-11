@@ -3,3 +3,5 @@
 __pycache__
 streamlit.err.log
 streamlit.out.log
+streamlit_*.log
+streamlit_local.*.log

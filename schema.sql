@@ -25,7 +25,12 @@ create table if not exists rubricas (
   valor_orcado numeric(14,2) not null check (valor_orcado >= 0),
   valor_reservado numeric(14,2) not null default 0,
   valor_utilizado numeric(14,2) not null default 0,
+  valor_minimo_operacional numeric(14,2) not null default 0,
+  reserva_tecnica_percentual numeric(5,2) not null default 5,
   responsaveis text,
+  encerrada boolean not null default false,
+  encerrada_em timestamptz,
+  encerrada_por uuid references usuarios_app(id),
   ativo boolean not null default true
 );
 
@@ -97,18 +102,58 @@ create table if not exists historico_status (
   criado_em timestamptz not null default now()
 );
 
+create table if not exists movimentacoes_orcamento (
+  id bigserial primary key,
+  rubrica_id bigint not null references rubricas(id),
+  usuario_id uuid references usuarios_app(id),
+  operacao text not null,
+  valor numeric(14,2) not null default 0,
+  justificativa text,
+  criado_em timestamptz not null default now()
+);
+
 create or replace view vw_orcamento as
 select
   r.id,
   r.codigo,
   r.nome,
-  r.responsaveis,
   r.tipo,
   r.valor_orcado,
   r.valor_reservado,
   r.valor_utilizado,
-  (r.valor_orcado - r.valor_reservado - r.valor_utilizado) as saldo_disponivel,
-  case when r.valor_orcado > 0 then round((r.valor_utilizado * 100.0 / r.valor_orcado),2) else 0 end as percentual_utilizado
+  (
+    r.valor_orcado
+    - round((r.valor_orcado * r.reserva_tecnica_percentual / 100.0), 2)
+    - r.valor_reservado
+    - r.valor_utilizado
+  ) as saldo_disponivel,
+  case when r.valor_orcado > 0 then round((r.valor_utilizado * 100.0 / r.valor_orcado),2) else 0 end as percentual_utilizado,
+  r.valor_minimo_operacional,
+  r.reserva_tecnica_percentual,
+  round((r.valor_orcado * r.reserva_tecnica_percentual / 100.0), 2) as reserva_tecnica,
+  case
+    when (
+      r.valor_orcado
+      - round((r.valor_orcado * r.reserva_tecnica_percentual / 100.0), 2)
+      - r.valor_reservado
+      - r.valor_utilizado
+    ) > 0
+     and (
+      r.valor_orcado
+      - round((r.valor_orcado * r.reserva_tecnica_percentual / 100.0), 2)
+      - r.valor_reservado
+      - r.valor_utilizado
+    ) < r.valor_minimo_operacional
+    then (
+      r.valor_orcado
+      - round((r.valor_orcado * r.reserva_tecnica_percentual / 100.0), 2)
+      - r.valor_reservado
+      - r.valor_utilizado
+    )
+    else 0
+  end as saldo_residual,
+  r.encerrada,
+  case when r.valor_orcado > 0 then round(((round((r.valor_orcado * r.reserva_tecnica_percentual / 100.0), 2) + r.valor_reservado + r.valor_utilizado) * 100.0 / r.valor_orcado),2) else 0 end as percentual_comprometido
 from rubricas r
 where r.ativo = true;
 

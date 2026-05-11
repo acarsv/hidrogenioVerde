@@ -1,7 +1,7 @@
 import os
 from io import BytesIO
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import bcrypt
 import pandas as pd
 import psycopg2
@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 load_dotenv(override=True)
 st.set_page_config(page_title="Hidrogênio Verde - Compras", layout="wide")
-APP_DEPLOY_VERSION = "2026-05-11.4"
+APP_DEPLOY_VERSION = "2026-05-11.8"
 
 def get_conn():
     database_url = os.environ.get("DATABASE_URL")
@@ -80,6 +80,94 @@ def has_column(table_name: str, column_name: str) -> bool:
     """, (table_name, column_name))
     return len(df) == 1
 
+def ensure_financial_governance_schema():
+    if not has_column("rubricas", "valor_minimo_operacional"):
+        execute("alter table rubricas add column valor_minimo_operacional numeric(14,2) not null default 0")
+    if not has_column("rubricas", "reserva_tecnica_percentual"):
+        execute("alter table rubricas add column reserva_tecnica_percentual numeric(5,2) not null default 5")
+    if not has_column("rubricas", "encerrada"):
+        execute("alter table rubricas add column encerrada boolean not null default false")
+    if not has_column("rubricas", "encerrada_em"):
+        execute("alter table rubricas add column encerrada_em timestamptz")
+    if not has_column("rubricas", "encerrada_por"):
+        execute("alter table rubricas add column encerrada_por uuid references usuarios_app(id)")
+
+    execute("""
+    update rubricas
+    set valor_minimo_operacional = case
+        when tipo = 'material_permanente' then 2000
+        when tipo = 'material_consumo' then 300
+        when tipo = 'servico_pf' then 500
+        else 0
+    end
+    where valor_minimo_operacional = 0
+    """)
+
+    execute("""
+    create table if not exists movimentacoes_orcamento (
+      id bigserial primary key,
+      rubrica_id bigint not null references rubricas(id),
+      usuario_id uuid references usuarios_app(id),
+      operacao text not null,
+      valor numeric(14,2) not null default 0,
+      justificativa text,
+      criado_em timestamptz not null default now()
+    )
+    """)
+
+    execute("""
+    create or replace view vw_orcamento as
+    select
+      r.id,
+      r.codigo,
+      r.nome,
+      r.tipo,
+      r.valor_orcado,
+      r.valor_reservado,
+      r.valor_utilizado,
+      (
+        r.valor_orcado
+        - round((r.valor_orcado * r.reserva_tecnica_percentual / 100.0), 2)
+        - r.valor_reservado
+        - r.valor_utilizado
+      ) as saldo_disponivel,
+      case
+        when r.valor_orcado > 0 then round((r.valor_utilizado * 100.0 / r.valor_orcado), 2)
+        else 0
+      end as percentual_utilizado,
+      r.valor_minimo_operacional,
+      r.reserva_tecnica_percentual,
+      round((r.valor_orcado * r.reserva_tecnica_percentual / 100.0), 2) as reserva_tecnica,
+      case
+        when (
+          r.valor_orcado
+          - round((r.valor_orcado * r.reserva_tecnica_percentual / 100.0), 2)
+          - r.valor_reservado
+          - r.valor_utilizado
+        ) > 0
+         and (
+          r.valor_orcado
+          - round((r.valor_orcado * r.reserva_tecnica_percentual / 100.0), 2)
+          - r.valor_reservado
+          - r.valor_utilizado
+        ) < r.valor_minimo_operacional
+        then (
+          r.valor_orcado
+          - round((r.valor_orcado * r.reserva_tecnica_percentual / 100.0), 2)
+          - r.valor_reservado
+          - r.valor_utilizado
+        )
+        else 0
+      end as saldo_residual,
+      r.encerrada,
+      case
+        when r.valor_orcado > 0 then round(((round((r.valor_orcado * r.reserva_tecnica_percentual / 100.0), 2) + r.valor_reservado + r.valor_utilizado) * 100.0 / r.valor_orcado), 2)
+        else 0
+      end as percentual_comprometido
+    from rubricas r
+    where r.ativo = true
+    """)
+
 def ensure_permissions_schema():
     if not has_column("usuarios_app", "permissoes"):
         st.error("O banco precisa da coluna de permissões para iniciar o app.")
@@ -103,15 +191,55 @@ def check_password(password: str, senha_hash: str) -> bool:
     return bcrypt.checkpw(password.encode(), senha_hash.encode())
 
 def format_brl(value) -> str:
-    value = float(value)
-    return f"{value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    try:
+        value = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        value = Decimal("0")
+    formatted = f"{value:,.2f}"
+    return formatted.replace(",", "X").replace(".", ",").replace("X", ".")
 
 def format_currency_brl(valor) -> str:
-    valor = float(valor)
-    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"R$ {format_brl(valor)}"
+
+def format_currency_brl_markdown(valor) -> str:
+    return format_currency_brl(valor).replace("$", r"\$")
 
 def format_percent_brl(value) -> str:
     return f"{format_brl(value)}%"
+
+def financial_status(row) -> str:
+    saldo_disponivel = Decimal(str(row.get("saldo_disponivel", 0)))
+    valor_minimo = Decimal(str(row.get("valor_minimo_operacional", 0)))
+    percentual_comprometido = Decimal(str(row.get("percentual_comprometido", 0)))
+
+    if bool(row.get("encerrada", False)) or saldo_disponivel <= 0:
+        return "Encerrado"
+    if valor_minimo > 0 and saldo_disponivel < valor_minimo:
+        return "Residual"
+    if percentual_comprometido > 90:
+        return "Critico"
+    if percentual_comprometido > 70:
+        return "Comprometido"
+    return "Disponivel"
+
+def status_alert_level(status: str) -> str:
+    return {
+        "Encerrado": "Cinza",
+        "Residual": "Vermelho",
+        "Critico": "Laranja",
+        "Comprometido": "Amarelo",
+        "Disponivel": "Verde",
+        "Normal": "Verde",
+    }.get(status, "Verde")
+
+def risk_color_css(risk: str) -> str:
+    return {
+        "Verde": "#16a34a",
+        "Amarelo": "#ca8a04",
+        "Laranja": "#ea580c",
+        "Vermelho": "#dc2626",
+        "Cinza": "#6b7280",
+    }.get(risk, "#16a34a")
 
 def excede_saldo_disponivel(rubrica_id: int, valor: Decimal) -> tuple[bool, Decimal]:
     saldo_df = query("select saldo_disponivel from vw_orcamento where id=%s", (rubrica_id,))
@@ -226,6 +354,152 @@ def atualizar_responsaveis_dialog():
     if c2.button("Cancelar", use_container_width=True):
         st.rerun()
 
+@st.dialog("Remanejar saldo")
+def remanejar_saldo_dialog(usuario_id):
+    rubricas = query("""
+    select id, codigo, nome, saldo_disponivel
+    from vw_orcamento
+    where encerrada = false
+    order by codigo
+    """)
+    if len(rubricas) < 2:
+        st.info("Sao necessarias pelo menos duas rubricas ativas para remanejamento.")
+        return
+
+    def label_rubrica(item_id):
+        rubrica = rubricas.loc[rubricas.id == item_id].iloc[0]
+        return f"{rubrica['codigo']} - {rubrica['nome']} ({format_currency_brl(rubrica['saldo_disponivel'])})"
+
+    origem_id = st.selectbox("Rubrica origem", rubricas["id"].tolist(), format_func=label_rubrica)
+    destino_id = st.selectbox("Rubrica destino", rubricas["id"].tolist(), format_func=label_rubrica)
+    saldo_origem = Decimal(str(rubricas.loc[rubricas.id == origem_id, "saldo_disponivel"].iloc[0]))
+    valor_maximo = float(max(saldo_origem, Decimal("0.01")))
+    valor = st.number_input("Valor", min_value=0.01, max_value=valor_maximo, value=0.01, step=100.0)
+    justificativa = st.text_area("Justificativa formal")
+
+    c1, c2 = st.columns(2)
+    if c1.button("Confirmar remanejamento", type="primary", use_container_width=True):
+        valor_decimal = Decimal(str(valor))
+        if origem_id == destino_id:
+            st.error("A rubrica de origem deve ser diferente da rubrica de destino.")
+        elif valor_decimal > saldo_origem:
+            st.error("O valor informado supera o saldo disponivel da rubrica de origem.")
+        elif not justificativa.strip():
+            st.error("Informe uma justificativa para auditoria.")
+        else:
+            execute("update rubricas set valor_orcado = valor_orcado - %s where id = %s", (valor_decimal, int(origem_id)))
+            execute("update rubricas set valor_orcado = valor_orcado + %s where id = %s", (valor_decimal, int(destino_id)))
+            execute(
+                "insert into movimentacoes_orcamento (rubrica_id, usuario_id, operacao, valor, justificativa) values (%s,%s,'remanejamento_saida',%s,%s)",
+                (int(origem_id), usuario_id, valor_decimal, justificativa),
+            )
+            execute(
+                "insert into movimentacoes_orcamento (rubrica_id, usuario_id, operacao, valor, justificativa) values (%s,%s,'remanejamento_entrada',%s,%s)",
+                (int(destino_id), usuario_id, valor_decimal, justificativa),
+            )
+            st.success("Remanejamento registrado.")
+            st.rerun()
+    if c2.button("Cancelar", use_container_width=True):
+        st.rerun()
+
+@st.dialog("Reservar valor")
+def reservar_valor_dialog(usuario_id):
+    rubricas = query("""
+    select id, codigo, nome, saldo_disponivel
+    from vw_orcamento
+    where encerrada = false
+    order by codigo
+    """)
+    if len(rubricas) == 0:
+        st.info("Nao ha rubricas abertas para reserva.")
+        return
+
+    def label_rubrica(item_id):
+        rubrica = rubricas.loc[rubricas.id == item_id].iloc[0]
+        return f"{rubrica['codigo']} - {rubrica['nome']} ({format_currency_brl(rubrica['saldo_disponivel'])})"
+
+    rubrica_id = st.selectbox("Rubrica", rubricas["id"].tolist(), format_func=label_rubrica)
+    saldo = Decimal(str(rubricas.loc[rubricas.id == rubrica_id, "saldo_disponivel"].iloc[0]))
+    valor_maximo = float(max(saldo, Decimal("0.01")))
+    valor = st.number_input("Valor reservado", min_value=0.01, max_value=valor_maximo, value=0.01, step=100.0)
+    descricao = st.text_input("Descricao da reserva", value="Reserva financeira administrativa")
+    justificativa = st.text_area("Justificativa")
+
+    if st.button("Registrar reserva", type="primary", use_container_width=True):
+        valor_decimal = Decimal(str(valor))
+        if valor_decimal > saldo:
+            st.error("O valor informado supera o saldo disponivel da rubrica.")
+        elif not justificativa.strip():
+            st.error("Informe uma justificativa para auditoria.")
+        else:
+            execute("""
+            insert into solicitacoes_compra
+              (rubrica_id, solicitante_id, gerente_id, descricao, quantidade, unidade, valor_estimado, justificativa, status, autorizado, autorizado_em)
+            values (%s,%s,%s,%s,1,'un',%s,%s,'em_andamento',true,now())
+            """, (int(rubrica_id), usuario_id, usuario_id, descricao, valor_decimal, justificativa))
+            execute(
+                "insert into movimentacoes_orcamento (rubrica_id, usuario_id, operacao, valor, justificativa) values (%s,%s,'reserva_financeira',%s,%s)",
+                (int(rubrica_id), usuario_id, valor_decimal, justificativa),
+            )
+            sincronizar_orcamento()
+            st.success("Reserva registrada.")
+            st.rerun()
+
+@st.dialog("Encerrar rubrica")
+def encerrar_rubrica_dialog(usuario_id):
+    rubricas = query("""
+    select id, codigo, nome
+    from vw_orcamento
+    where encerrada = false
+    order by codigo
+    """)
+    if len(rubricas) == 0:
+        st.info("Nao ha rubricas abertas para encerrar.")
+        return
+
+    rubrica_id = st.selectbox(
+        "Rubrica",
+        rubricas["id"].tolist(),
+        format_func=lambda item_id: f"{rubricas.loc[rubricas.id == item_id, 'codigo'].iloc[0]} - {rubricas.loc[rubricas.id == item_id, 'nome'].iloc[0]}",
+    )
+    justificativa = st.text_area("Justificativa de encerramento")
+    if st.button("Encerrar oficialmente", type="primary", use_container_width=True):
+        if not justificativa.strip():
+            st.error("Informe uma justificativa para auditoria.")
+        else:
+            execute(
+                "update rubricas set encerrada = true, encerrada_em = now(), encerrada_por = %s where id = %s",
+                (usuario_id, int(rubrica_id)),
+            )
+            execute(
+                "insert into movimentacoes_orcamento (rubrica_id, usuario_id, operacao, valor, justificativa) values (%s,%s,'encerramento',0,%s)",
+                (int(rubrica_id), usuario_id, justificativa),
+            )
+            st.success("Rubrica encerrada.")
+            st.rerun()
+
+@st.dialog("Historico/Auditoria")
+def historico_orcamento_dialog():
+    historico = query("""
+    select
+      m.criado_em as "Data",
+      r.codigo as "Rubrica",
+      coalesce(u.nome, 'Sistema') as "Usuario",
+      m.operacao as "Operacao",
+      m.valor as "Valor",
+      m.justificativa as "Justificativa"
+    from movimentacoes_orcamento m
+    join rubricas r on r.id = m.rubrica_id
+    left join usuarios_app u on u.id = m.usuario_id
+    order by m.criado_em desc
+    limit 200
+    """)
+    if len(historico) == 0:
+        st.info("Ainda nao ha movimentacoes orcamentarias registradas.")
+        return
+    historico["Valor"] = historico["Valor"].apply(format_currency_brl)
+    st.dataframe(historico, use_container_width=True, hide_index=True)
+
 def cancelar_solicitacao(solicitacao_id, usuario_id):
     compra = query("""
     select c.id
@@ -273,6 +547,7 @@ def sincronizar_orcamento():
 
 try:
     ensure_permissions_schema()
+    ensure_financial_governance_schema()
 except psycopg2.Error as exc:
     st.error("Nao foi possivel preparar o banco de dados para iniciar o app.")
     st.caption("Confira se as tabelas foram criadas no Supabase e reinicie o app no Streamlit Cloud.")
@@ -361,17 +636,30 @@ st.markdown(
 )
 
 if menu == "orcamento":
+    if st.button("Solicitar compra"):
+        st.session_state.menu_key = "nova_exigencia"
+        st.rerun()
+
     if user["papel"] in ["admin", "gerente"]:
-        c_recalcular, c_responsaveis = st.columns([1, 2])
+        c_recalcular, c_responsaveis, c_reservar, c_remanejar, c_encerrar, c_historico = st.columns(6)
         if c_recalcular.button("Recalcular orçamento"):
             sincronizar_orcamento()
             st.success("Orçamento recalculado com base nas compras existentes.")
             st.rerun()
         if c_responsaveis.button("Atualizar responsáveis"):
             atualizar_responsaveis_dialog()
+        if c_reservar.button("Reservar valor"):
+            reservar_valor_dialog(user["id"])
+        if c_remanejar.button("Remanejar saldo"):
+            remanejar_saldo_dialog(user["id"])
+        if c_encerrar.button("Encerrar rubrica"):
+            encerrar_rubrica_dialog(user["id"])
+        if c_historico.button("Histórico/Auditoria"):
+            historico_orcamento_dialog()
 
     df = query("""
     select
+      v.id,
       v.codigo,
       v.nome,
       coalesce(r.responsaveis, '') as responsaveis,
@@ -379,38 +667,167 @@ if menu == "orcamento":
       v.valor_orcado,
       v.valor_reservado,
       v.valor_utilizado,
+      v.reserva_tecnica,
+      v.reserva_tecnica_percentual,
+      v.valor_minimo_operacional,
       v.saldo_disponivel,
-      v.percentual_utilizado
+      v.saldo_residual,
+      v.percentual_comprometido,
+      v.percentual_utilizado,
+      v.encerrada
     from vw_orcamento v
     join rubricas r on r.id = v.id
     order by v.codigo
     """)
+    if len(df) == 0:
+        st.info("Não há rubricas cadastradas no orçamento.")
+        st.stop()
+
+    df["status_financeiro"] = df.apply(financial_status, axis=1)
+    df["risco"] = df["status_financeiro"].apply(status_alert_level)
+
+    total_orcado = df.valor_orcado.sum()
+    total_reservado = df.valor_reservado.sum()
+    total_utilizado = df.valor_utilizado.sum()
+    total_disponivel = df.saldo_disponivel.sum()
+    saldo_residual_total = df.saldo_residual.sum()
+    rubricas_criticas = df["status_financeiro"].isin(["Critico", "Residual", "Encerrado"]).sum()
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total orçado", format_currency_brl(total_orcado))
+    c2.metric("Total reservado", format_currency_brl(total_reservado))
+    c3.metric("Total utilizado", format_currency_brl(total_utilizado))
+    c4, c5, c6 = st.columns(3)
+    c4.metric("Disponível operacional", format_currency_brl(total_disponivel))
+    c5.metric("Saldo residual", format_currency_brl(saldo_residual_total))
+    c6.metric("Rubricas críticas", int(rubricas_criticas))
+
+    alertas = df[df["status_financeiro"].isin(["Comprometido", "Critico", "Residual", "Encerrado"])].copy()
+    if len(alertas):
+        with st.expander("Alertas financeiros", expanded=True):
+            for _, rubrica in alertas.iterrows():
+                st.write(
+                    f"{rubrica['codigo']} - {rubrica['nome']}: "
+                    f"{rubrica['status_financeiro']} "
+                    f"({format_currency_brl_markdown(rubrica['saldo_disponivel'])} operacional)"
+                )
+
     df_orcamento = df.rename(columns={
         "codigo": "Código",
-        "nome": "Nome",
+        "nome": "Rubrica",
         "responsaveis": "Responsável",
         "tipo": "Tipo",
         "valor_orcado": "Valor orçado",
         "valor_reservado": "Valor reservado",
         "valor_utilizado": "Valor utilizado",
-        "saldo_disponivel": "Saldo disponível",
+        "reserva_tecnica": "Reserva técnica",
+        "valor_minimo_operacional": "Mínimo operacional",
+        "saldo_disponivel": "Disponível operacional",
+        "saldo_residual": "Saldo residual",
+        "percentual_comprometido": "Índice comprometido",
         "percentual_utilizado": "Percentual utilizado",
+        "status_financeiro": "Status financeiro",
+        "risco": "Risco",
     })
-    for coluna in ["Valor orçado", "Valor reservado", "Valor utilizado", "Saldo disponível"]:
+    df_orcamento["Índice comprometido"] = pd.to_numeric(df_orcamento["Índice comprometido"], errors="coerce").fillna(0)
+    for coluna in [
+        "Valor orçado",
+        "Valor reservado",
+        "Valor utilizado",
+        "Reserva técnica",
+        "Mínimo operacional",
+        "Disponível operacional",
+        "Saldo residual",
+    ]:
         df_orcamento[coluna] = df_orcamento[coluna].apply(format_currency_brl)
     df_orcamento["Percentual utilizado"] = df_orcamento["Percentual utilizado"].apply(format_percent_brl)
-    st.dataframe(df_orcamento, use_container_width=True, hide_index=True)
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total orçado", format_currency_brl(df.valor_orcado.sum()))
-    c2.metric("Total utilizado", format_currency_brl(df.valor_utilizado.sum()))
-    c3.metric("Saldo disponível", format_currency_brl(df.saldo_disponivel.sum()))
+    risco_labels = df_orcamento["Risco"].copy()
+    df_orcamento["Risco"] = "●"
+    colunas_orcamento = [
+        "Código",
+        "Rubrica",
+        "Tipo",
+        "Responsável",
+        "Valor orçado",
+        "Valor reservado",
+        "Valor utilizado",
+        "Reserva técnica",
+        "Mínimo operacional",
+        "Disponível operacional",
+        "Saldo residual",
+        "Índice comprometido",
+        "Status financeiro",
+        "Risco",
+    ]
+    df_orcamento_visual = df_orcamento[colunas_orcamento].style.apply(
+        lambda coluna: [
+            (
+                f"color: {risk_color_css(risco_labels.loc[indice])}; "
+                "font-size: 22px; font-weight: 700; text-align: center;"
+            )
+            for indice in coluna.index
+        ],
+        subset=["Risco"],
+        axis=0,
+    )
+    st.dataframe(
+        df_orcamento_visual,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Índice comprometido": st.column_config.ProgressColumn(
+                "Índice comprometido",
+                format="%.2f%%",
+                min_value=0,
+                max_value=100,
+            ),
+            "Risco": st.column_config.TextColumn("Risco", width="small"),
+        },
+    )
+
+    with st.expander("Parametros de governanca por rubrica"):
+        rubrica_id = st.selectbox(
+            "Rubrica",
+            df["id"].tolist(),
+            format_func=lambda item_id: f"{df.loc[df.id == item_id, 'codigo'].iloc[0]} - {df.loc[df.id == item_id, 'nome'].iloc[0]}",
+            key="orcamento_parametros_rubrica",
+        )
+        rubrica = df.loc[df.id == rubrica_id].iloc[0]
+        p1, p2 = st.columns(2)
+        novo_minimo = p1.number_input(
+            "Valor mínimo operacional",
+            min_value=0.0,
+            value=float(rubrica["valor_minimo_operacional"]),
+            step=50.0,
+        )
+        nova_reserva = p2.number_input(
+            "Reserva técnica (%)",
+            min_value=0.0,
+            max_value=100.0,
+            value=float(rubrica["reserva_tecnica_percentual"]),
+            step=0.5,
+        )
+        if st.button("Salvar parâmetros da rubrica", type="primary"):
+            execute(
+                "update rubricas set valor_minimo_operacional=%s, reserva_tecnica_percentual=%s where id=%s",
+                (Decimal(str(novo_minimo)), Decimal(str(nova_reserva)), int(rubrica_id)),
+            )
+            execute(
+                "insert into movimentacoes_orcamento (rubrica_id, usuario_id, operacao, valor, justificativa) values (%s,%s,'parametros_governanca',0,%s)",
+                (int(rubrica_id), user["id"], "Atualizacao de valor minimo operacional e reserva tecnica."),
+            )
+            st.success("Parâmetros atualizados.")
+            st.rerun()
 
 elif menu == "nova_exigencia":
-    rubricas = query("select id, codigo || ' - ' || nome as label, saldo_disponivel from vw_orcamento order by codigo")
+    rubricas = query("select id, codigo || ' - ' || nome as label, saldo_disponivel from vw_orcamento where encerrada = false order by codigo")
+    if len(rubricas) == 0:
+        st.info("Não há rubricas abertas para novas solicitações.")
+        st.stop()
     rubrica_label = st.selectbox("Rubrica/categoria", rubricas["label"])
     rubrica_id = int(rubricas.loc[rubricas["label"] == rubrica_label, "id"].iloc[0])
     saldo_atual = Decimal(str(rubricas.loc[rubricas["label"] == rubrica_label, "saldo_disponivel"].iloc[0]))
-    st.caption(f"Saldo disponível: {format_currency_brl(saldo_atual)}")
+    st.caption(f"Disponível operacional: {format_currency_brl_markdown(saldo_atual)}")
     descricao = st.text_area("Descrição detalhada do item/serviço")
     quantidade = st.number_input("Quantidade", min_value=0.001, value=1.0)
     unidade = st.text_input("Unidade", value="un")
@@ -429,8 +846,8 @@ elif menu == "nova_exigencia":
         if excede_saldo:
             st.error(
                 "Solicitação não registrada. "
-                f"O valor total ({format_currency_brl(valor_estimado_decimal)}) "
-                f"supera o saldo disponível da rubrica ({format_currency_brl(saldo_disponivel)})."
+                f"O valor total ({format_currency_brl_markdown(valor_estimado_decimal)}) "
+                f"supera o disponível operacional da rubrica ({format_currency_brl_markdown(saldo_disponivel)})."
             )
         else:
             execute("""
@@ -479,8 +896,8 @@ elif menu == "solicitacoes":
                     if excede_saldo:
                         st.error(
                             "Solicitação não autorizada. "
-                            f"O valor estimado ({format_currency_brl(valor_autorizacao)}) "
-                            f"supera o saldo disponível da rubrica ({format_currency_brl(saldo_disponivel)})."
+                            f"O valor estimado ({format_currency_brl_markdown(valor_autorizacao)}) "
+                            f"supera o disponível operacional da rubrica ({format_currency_brl_markdown(saldo_disponivel)})."
                         )
                     else:
                         execute("update solicitacoes_compra set autorizado=true, gerente_id=%s, autorizado_em=now(), status='em_andamento' where id=%s", (user["id"], sid))
