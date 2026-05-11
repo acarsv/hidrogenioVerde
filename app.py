@@ -67,8 +67,27 @@ def execute(sql, params=None):
     finally:
         conn.close()
 
+def has_column(table_name: str, column_name: str) -> bool:
+    df = query("""
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = %s
+      and column_name = %s
+    limit 1
+    """, (table_name, column_name))
+    return len(df) == 1
+
 def ensure_permissions_schema():
-    execute("alter table usuarios_app add column if not exists permissoes text[] not null default array[]::text[]")
+    if not has_column("usuarios_app", "permissoes"):
+        st.error("O banco precisa da coluna de permissões para iniciar o app.")
+        st.caption("Execute este SQL no Supabase SQL Editor e reinicie o app no Streamlit Cloud.")
+        st.code(
+            "alter table usuarios_app add column permissoes text[] not null default array[]::text[];",
+            language="sql",
+        )
+        st.stop()
+
     execute("""
     update usuarios_app
     set permissoes = array['orcamento','nova_exigencia','solicitacoes','cotacoes','compra_nota','itens_comprados','membros']
