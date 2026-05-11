@@ -103,10 +103,12 @@ def check_password(password: str, senha_hash: str) -> bool:
     return bcrypt.checkpw(password.encode(), senha_hash.encode())
 
 def format_brl(value) -> str:
-    return f"{float(value or 0):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    value = float(value)
+    return f"{value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-def format_currency_brl(value) -> str:
-    return f"R$ {format_brl(value)}"
+def format_currency_brl(valor) -> str:
+    valor = float(valor)
+    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 def format_percent_brl(value) -> str:
     return f"{format_brl(value)}%"
