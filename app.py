@@ -110,6 +110,11 @@ def format_currency_brl(value: float) -> str:
 def format_percent_brl(value: float) -> str:
     return f"{format_brl(float(value or 0))}%"
 
+def excede_saldo_disponivel(rubrica_id: int, valor: Decimal) -> tuple[bool, Decimal]:
+    saldo_df = query("select saldo_disponivel from vw_orcamento where id=%s", (rubrica_id,))
+    saldo = Decimal(str(saldo_df.iloc[0]["saldo_disponivel"])) if len(saldo_df) == 1 else Decimal("0")
+    return valor > saldo, saldo
+
 def parse_responsaveis(value) -> list[str]:
     if value is None or pd.isna(value):
         return []
@@ -397,9 +402,11 @@ if menu == "orcamento":
     c3.metric("Saldo disponível", format_currency_brl(df.saldo_disponivel.sum()))
 
 elif menu == "nova_exigencia":
-    rubricas = query("select id, codigo || ' - ' || nome as label from vw_orcamento order by codigo")
+    rubricas = query("select id, codigo || ' - ' || nome as label, saldo_disponivel from vw_orcamento order by codigo")
     rubrica_label = st.selectbox("Rubrica/categoria", rubricas["label"])
     rubrica_id = int(rubricas.loc[rubricas["label"] == rubrica_label, "id"].iloc[0])
+    saldo_atual = Decimal(str(rubricas.loc[rubricas["label"] == rubrica_label, "saldo_disponivel"].iloc[0]))
+    st.caption(f"Saldo disponível: {format_currency_brl(saldo_atual)}")
     descricao = st.text_area("Descrição detalhada do item/serviço")
     quantidade = st.number_input("Quantidade", min_value=0.001, value=1.0)
     unidade = st.text_input("Unidade", value="un")
@@ -413,11 +420,20 @@ elif menu == "nova_exigencia":
     )
     justificativa = st.text_area("Justificativa")
     if st.button("Enviar solicitação"):
-        execute("""
-        insert into solicitacoes_compra (rubrica_id, solicitante_id, descricao, quantidade, unidade, valor_estimado, justificativa, status)
-        values (%s,%s,%s,%s,%s,%s,%s,'solicitacao')
-        """, (rubrica_id, user["id"], descricao, quantidade, unidade, valor_estimado, justificativa))
-        st.success("Solicitação registrada.")
+        valor_estimado_decimal = Decimal(str(valor_estimado))
+        excede_saldo, saldo_disponivel = excede_saldo_disponivel(rubrica_id, valor_estimado_decimal)
+        if excede_saldo:
+            st.error(
+                "Solicitação não registrada. "
+                f"O valor total ({format_currency_brl(valor_estimado_decimal)}) "
+                f"supera o saldo disponível da rubrica ({format_currency_brl(saldo_disponivel)})."
+            )
+        else:
+            execute("""
+            insert into solicitacoes_compra (rubrica_id, solicitante_id, descricao, quantidade, unidade, valor_estimado, justificativa, status)
+            values (%s,%s,%s,%s,%s,%s,%s,'solicitacao')
+            """, (rubrica_id, user["id"], descricao, quantidade, unidade, valor_estimado, justificativa))
+            st.success("Solicitação registrada.")
 
 elif menu == "solicitacoes":
     df = query("""
@@ -445,15 +461,31 @@ elif menu == "solicitacoes":
                 key="solicitacao_acao_id",
             )
             if st.button("Autorizar e colocar em andamento"):
-                existe = query("select id from solicitacoes_compra where id=%s", (sid,))
+                existe = query("""
+                select id, rubrica_id, coalesce(valor_estimado, 0) as valor_estimado, autorizado
+                from solicitacoes_compra
+                where id=%s
+                """, (sid,))
                 if len(existe) != 1:
                     st.error("Solicitação não encontrada.")
+                elif not bool(existe.iloc[0]["autorizado"]):
+                    valor_autorizacao = Decimal(str(existe.iloc[0]["valor_estimado"]))
+                    rubrica_autorizacao_id = int(existe.iloc[0]["rubrica_id"])
+                    excede_saldo, saldo_disponivel = excede_saldo_disponivel(rubrica_autorizacao_id, valor_autorizacao)
+                    if excede_saldo:
+                        st.error(
+                            "Solicitação não autorizada. "
+                            f"O valor estimado ({format_currency_brl(valor_autorizacao)}) "
+                            f"supera o saldo disponível da rubrica ({format_currency_brl(saldo_disponivel)})."
+                        )
+                    else:
+                        execute("update solicitacoes_compra set autorizado=true, gerente_id=%s, autorizado_em=now(), status='em_andamento' where id=%s", (user["id"], sid))
+                        execute("insert into historico_status (solicitacao_id,status_novo,usuario_id,observacao) values (%s,'em_andamento',%s,'Autorizada pelo gerente')", (sid, user["id"]))
+                        sincronizar_orcamento()
+                        st.success("Solicitação autorizada.")
+                        st.rerun()
                 else:
-                    execute("update solicitacoes_compra set autorizado=true, gerente_id=%s, autorizado_em=now(), status='em_andamento' where id=%s", (user["id"], sid))
-                    execute("insert into historico_status (solicitacao_id,status_novo,usuario_id,observacao) values (%s,'em_andamento',%s,'Autorizada pelo gerente')", (sid, user["id"]))
-                    sincronizar_orcamento()
-                    st.success("Solicitação autorizada.")
-                    st.rerun()
+                    st.info("Esta solicitação já estava autorizada.")
             if st.button("Cancelar solicitação"):
                 cancelar_solicitacao(sid, user["id"])
                 st.success("Solicitação cancelada e removida da lista.")
