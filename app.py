@@ -12,7 +12,6 @@ from urllib.parse import urlparse
 load_dotenv(override=True)
 st.set_page_config(page_title="Hidrogênio Verde - Compras", layout="wide")
 
-@st.cache_resource
 def get_conn():
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
@@ -54,6 +53,8 @@ def query(sql, params=None):
     except Exception:
         conn.rollback()
         raise
+    finally:
+        conn.close()
 
 def execute(sql, params=None):
     conn = get_conn()
@@ -63,6 +64,8 @@ def execute(sql, params=None):
     except Exception:
         conn.rollback()
         raise
+    finally:
+        conn.close()
 
 def ensure_permissions_schema():
     execute("alter table usuarios_app add column if not exists permissoes text[] not null default array[]::text[]")
@@ -132,7 +135,14 @@ def sincronizar_orcamento():
     where r.id = totais.rubrica_id
     """)
 
-ensure_permissions_schema()
+try:
+    ensure_permissions_schema()
+except psycopg2.Error as exc:
+    st.error("Nao foi possivel preparar o banco de dados para iniciar o app.")
+    st.caption("Confira se as tabelas foram criadas no Supabase e reinicie o app no Streamlit Cloud.")
+    with st.expander("Detalhe tecnico"):
+        st.code(str(exc))
+    st.stop()
 
 if "user" not in st.session_state:
     st.session_state.user = None
