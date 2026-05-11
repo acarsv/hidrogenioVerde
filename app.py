@@ -101,14 +101,14 @@ def hash_password(password: str) -> str:
 def check_password(password: str, senha_hash: str) -> bool:
     return bcrypt.checkpw(password.encode(), senha_hash.encode())
 
-def format_brl(value: float) -> str:
-    return f"{value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+def format_brl(value) -> str:
+    return f"{float(value or 0):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-def format_currency_brl(value: float) -> str:
-    return f"R$ {format_brl(float(value or 0))}"
+def format_currency_brl(value) -> str:
+    return f"R$ {format_brl(value)}"
 
-def format_percent_brl(value: float) -> str:
-    return f"{format_brl(float(value or 0))}%"
+def format_percent_brl(value) -> str:
+    return f"{format_brl(value)}%"
 
 def excede_saldo_disponivel(rubrica_id: int, valor: Decimal) -> tuple[bool, Decimal]:
     saldo_df = query("select saldo_disponivel from vw_orcamento where id=%s", (rubrica_id,))
@@ -414,7 +414,7 @@ elif menu == "nova_exigencia":
     valor_estimado = quantidade * valor_unitario_estimado
     st.text_input(
         "Valor total (R$)",
-        value=format_brl(valor_estimado),
+        value=format_currency_brl(valor_estimado),
         disabled=True,
         key=f"nova_valor_total_{quantidade}_{valor_unitario_estimado}_{valor_estimado:.2f}",
     )
@@ -508,7 +508,7 @@ elif menu == "cotacoes":
         contato = st.text_input("Telefone/E-mail", key=f"cotacao_contato_{sid}_{ordem}")
         valor_unit = st.number_input("Valor unitário", min_value=0.0, value=valor_unitario_padrao, key=f"cotacao_valor_unitario_{sid}_{ordem}")
         valor_total = quantidade_solicitada * valor_unit
-        st.text_input("Valor total", value=format_brl(valor_total), disabled=True, key=f"cotacao_valor_total_{sid}_{ordem}_{valor_total:.2f}")
+        st.text_input("Valor total", value=format_currency_brl(valor_total), disabled=True, key=f"cotacao_valor_total_{sid}_{ordem}_{valor_total:.2f}")
         prazo = st.text_input("Prazo de entrega", key=f"cotacao_prazo_{sid}_{ordem}")
         pagamento = st.text_input("Forma de pagamento", key=f"cotacao_pagamento_{sid}_{ordem}")
         if st.button("Salvar cotação"):
