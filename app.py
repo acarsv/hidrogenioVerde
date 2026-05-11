@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 
 load_dotenv(override=True)
 st.set_page_config(page_title="Hidrogênio Verde - Compras", layout="wide")
+APP_DEPLOY_VERSION = "2026-05-11.1"
 
 def get_conn():
     database_url = os.environ.get("DATABASE_URL")
