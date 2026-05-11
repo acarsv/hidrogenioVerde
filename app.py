@@ -20,7 +20,9 @@ def get_conn():
         st.stop()
 
     try:
-        return psycopg2.connect(database_url)
+        conn = psycopg2.connect(database_url)
+        conn.autocommit = True
+        return conn
     except psycopg2.OperationalError as exc:
         parsed = urlparse(database_url)
         host = parsed.hostname or "host nao identificado"
@@ -43,18 +45,24 @@ def get_conn():
 
 def query(sql, params=None):
     conn = get_conn()
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(sql, params or ())
-        if cur.description:
-            return pd.DataFrame(cur.fetchall())
-        conn.commit()
-        return pd.DataFrame()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params or ())
+            if cur.description:
+                return pd.DataFrame(cur.fetchall())
+            return pd.DataFrame()
+    except Exception:
+        conn.rollback()
+        raise
 
 def execute(sql, params=None):
     conn = get_conn()
-    with conn.cursor() as cur:
-        cur.execute(sql, params or ())
-    conn.commit()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params or ())
+    except Exception:
+        conn.rollback()
+        raise
 
 def ensure_permissions_schema():
     execute("alter table usuarios_app add column if not exists permissoes text[] not null default array[]::text[]")
