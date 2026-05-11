@@ -109,6 +109,63 @@ def format_currency_brl(value: float) -> str:
 def format_percent_brl(value: float) -> str:
     return f"{format_brl(float(value or 0))}%"
 
+def parse_responsaveis(value) -> list[str]:
+    if value is None or pd.isna(value):
+        return []
+    return [item.strip() for item in str(value).split(",") if item.strip()]
+
+@st.dialog("Atualizar responsáveis")
+def atualizar_responsaveis_dialog():
+    rubricas = query("""
+    select id, codigo, nome, coalesce(responsaveis, '') as responsaveis
+    from rubricas
+    where ativo = true
+    order by codigo
+    """)
+    if len(rubricas) == 0:
+        st.info("Não há rubricas ativas para atualizar.")
+        return
+
+    rubrica_id = st.selectbox(
+        "Rubrica",
+        rubricas["id"].tolist(),
+        format_func=lambda item_id: (
+            f"{rubricas.loc[rubricas.id == item_id, 'codigo'].iloc[0]} - "
+            f"{rubricas.loc[rubricas.id == item_id, 'nome'].iloc[0]}"
+        ),
+    )
+    rubrica = rubricas.loc[rubricas.id == rubrica_id].iloc[0]
+    responsaveis_atuais = parse_responsaveis(rubrica["responsaveis"])
+
+    membros = query("""
+    select nome
+    from usuarios_app
+    where ativo = true
+    order by nome
+    """)
+    opcoes = membros["nome"].tolist() if len(membros) else []
+    for responsavel in responsaveis_atuais:
+        if responsavel not in opcoes:
+            opcoes.append(responsavel)
+
+    responsaveis = st.multiselect(
+        "Responsáveis",
+        opcoes,
+        default=responsaveis_atuais,
+        placeholder="Selecione um ou mais responsáveis",
+    )
+
+    c1, c2 = st.columns(2)
+    if c1.button("Salvar", type="primary", use_container_width=True):
+        execute(
+            "update rubricas set responsaveis=%s where id=%s",
+            (", ".join(responsaveis) if responsaveis else None, int(rubrica_id)),
+        )
+        st.success("Responsáveis atualizados.")
+        st.rerun()
+    if c2.button("Cancelar", use_container_width=True):
+        st.rerun()
+
 def cancelar_solicitacao(solicitacao_id, usuario_id):
     compra = query("""
     select c.id
@@ -243,14 +300,34 @@ st.markdown(
 )
 
 if menu == "orcamento":
-    if user["papel"] in ["admin", "gerente"] and st.button("Recalcular orçamento"):
-        sincronizar_orcamento()
-        st.success("Orçamento recalculado com base nas compras existentes.")
-        st.rerun()
-    df = query("select codigo,nome,tipo,valor_orcado,valor_reservado,valor_utilizado,saldo_disponivel,percentual_utilizado from vw_orcamento order by codigo")
+    if user["papel"] in ["admin", "gerente"]:
+        c_recalcular, c_responsaveis = st.columns([1, 2])
+        if c_recalcular.button("Recalcular orçamento"):
+            sincronizar_orcamento()
+            st.success("Orçamento recalculado com base nas compras existentes.")
+            st.rerun()
+        if c_responsaveis.button("Atualizar responsáveis"):
+            atualizar_responsaveis_dialog()
+
+    df = query("""
+    select
+      v.codigo,
+      v.nome,
+      coalesce(r.responsaveis, '') as responsaveis,
+      v.tipo,
+      v.valor_orcado,
+      v.valor_reservado,
+      v.valor_utilizado,
+      v.saldo_disponivel,
+      v.percentual_utilizado
+    from vw_orcamento v
+    join rubricas r on r.id = v.id
+    order by v.codigo
+    """)
     df_orcamento = df.rename(columns={
         "codigo": "Código",
         "nome": "Nome",
+        "responsaveis": "Responsável",
         "tipo": "Tipo",
         "valor_orcado": "Valor orçado",
         "valor_reservado": "Valor reservado",

@@ -102,6 +102,7 @@ select
   r.id,
   r.codigo,
   r.nome,
+  r.responsaveis,
   r.tipo,
   r.valor_orcado,
   r.valor_reservado,
