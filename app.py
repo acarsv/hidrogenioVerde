@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 load_dotenv(override=True)
 st.set_page_config(page_title="Hidrogênio Verde - Compras", layout="wide")
-APP_DEPLOY_VERSION = "2026-05-11.9"
+APP_DEPLOY_VERSION = "2026-05-11.10"
 
 def get_conn():
     database_url = os.environ.get("DATABASE_URL")
@@ -115,9 +115,8 @@ def ensure_financial_governance_schema():
     )
     """)
 
-    execute("drop view if exists vw_orcamento")
     execute("""
-    create view vw_orcamento as
+    create or replace view vw_orcamento as
     select
       r.id,
       r.codigo,
