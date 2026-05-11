@@ -1,4 +1,5 @@
 import os
+from io import BytesIO
 from datetime import date
 from decimal import Decimal
 import bcrypt
@@ -113,6 +114,57 @@ def parse_responsaveis(value) -> list[str]:
     if value is None or pd.isna(value):
         return []
     return [item.strip() for item in str(value).split(",") if item.strip()]
+
+def nome_aba_excel(nome: str, usadas: set[str]) -> str:
+    caracteres_invalidos = "[]:*?/\\"
+    base = "".join("_" if char in caracteres_invalidos else char for char in str(nome or "Rubrica"))
+    base = base.strip()[:31] or "Rubrica"
+    nome_final = base
+    contador = 2
+    while nome_final in usadas:
+        sufixo = f"_{contador}"
+        nome_final = f"{base[:31 - len(sufixo)]}{sufixo}"
+        contador += 1
+    usadas.add(nome_final)
+    return nome_final
+
+def construir_planilha_itens_comprados(df: pd.DataFrame) -> bytes:
+    planilha = df.copy()
+    for coluna in ["Quantidade", "Valor da compra", "Valor da NF"]:
+        planilha[coluna] = pd.to_numeric(planilha[coluna], errors="coerce").fillna(0)
+    for coluna in ["Data de emissão", "Lançado em"]:
+        planilha[coluna] = planilha[coluna].astype(str).replace({"NaT": "", "None": ""})
+
+    resumo = (
+        planilha
+        .groupby(["Rubrica", "Nome da rubrica"], dropna=False)
+        .agg(
+            Itens=("Solicitação", "count"),
+            Total_compra=("Valor da compra", "sum"),
+            Total_nf=("Valor da NF", "sum"),
+        )
+        .reset_index()
+        .rename(columns={
+            "Total_compra": "Total da compra",
+            "Total_nf": "Total da NF",
+        })
+    )
+
+    arquivo = BytesIO()
+    with pd.ExcelWriter(arquivo, engine="openpyxl") as writer:
+        resumo.to_excel(writer, index=False, sheet_name="Resumo por rubrica")
+        abas_usadas = {"Resumo por rubrica"}
+        for rubrica, itens_rubrica in planilha.groupby("Rubrica", dropna=False):
+            nome_aba = nome_aba_excel(rubrica, abas_usadas)
+            itens_rubrica.to_excel(writer, index=False, sheet_name=nome_aba)
+
+        for worksheet in writer.book.worksheets:
+            for column_cells in worksheet.columns:
+                largura = max(len(str(cell.value or "")) for cell in column_cells)
+                worksheet.column_dimensions[column_cells[0].column_letter].width = min(max(largura + 2, 12), 50)
+
+    arquivo.seek(0)
+    return arquivo.getvalue()
 
 @st.dialog("Atualizar responsáveis")
 def atualizar_responsaveis_dialog():
@@ -527,17 +579,18 @@ elif menu == "compra_nota":
 elif menu == "itens_comprados":
     df = query("""
     select
-      s.id as solicitacao_id,
-      r.codigo as rubrica,
-      s.descricao,
-      s.quantidade,
+      s.id as "Solicitação",
+      r.codigo as "Rubrica",
+      r.nome as "Nome da rubrica",
+      s.descricao as "Produto/serviço",
+      s.quantidade as "Quantidade",
       c.valor_compra as "Valor da compra",
-      co.fornecedor as fornecedor_cotacao,
-      nf.numero_nf,
-      nf.fornecedor as fornecedor_nf,
+      co.fornecedor as "Fornecedor da cotação",
+      nf.numero_nf as "Número da NF",
+      nf.fornecedor as "Fornecedor da NF",
       nf.valor_nf as "Valor da NF",
-      nf.data_emissao,
-      nf.lancado_em
+      nf.data_emissao as "Data de emissão",
+      nf.lancado_em as "Lançado em"
     from solicitacoes_compra s
     join rubricas r on r.id = s.rubrica_id
     join compras c on c.solicitacao_id = s.id
@@ -549,6 +602,12 @@ elif menu == "itens_comprados":
     if len(df) == 0:
         st.info("Ainda não há itens comprados finalizados.")
     else:
+        st.download_button(
+            "Baixar planilha por rubrica",
+            data=construir_planilha_itens_comprados(df),
+            file_name=f"produtos_comprados_por_rubrica_{date.today().isoformat()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
         st.dataframe(
             df,
             use_container_width=True,
