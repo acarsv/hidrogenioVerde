@@ -112,7 +112,9 @@ create table if not exists movimentacoes_orcamento (
   criado_em timestamptz not null default now()
 );
 
-create or replace view vw_orcamento as
+drop view if exists vw_orcamento;
+
+create view vw_orcamento as
 select
   r.id,
   r.codigo,
