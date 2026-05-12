@@ -326,12 +326,12 @@ def atualizar_responsaveis_dialog():
     responsaveis_atuais = parse_responsaveis(rubrica["responsaveis"])
 
     membros = query("""
-    select nome
+    select split_part(trim(nome), ' ', 1) as usuario
     from usuarios_app
     where ativo = true
-    order by nome
+    order by usuario
     """)
-    opcoes = membros["nome"].tolist() if len(membros) else []
+    opcoes = membros["usuario"].tolist() if len(membros) else []
     for responsavel in responsaveis_atuais:
         if responsavel not in opcoes:
             opcoes.append(responsavel)
@@ -1239,7 +1239,14 @@ elif menu == "membros":
 
     st.markdown("### Membros cadastrados")
     membros = query("""
-    select nome, email, papel, permissoes, ativo, criado_em
+    select
+      split_part(trim(nome), ' ', 1) as usuario,
+      nome,
+      email,
+      papel,
+      permissoes,
+      ativo,
+      criado_em
     from usuarios_app
     order by criado_em desc
     """)
