@@ -639,7 +639,7 @@ menu_labels = dict(MENU_OPTIONS)
 menu_keys = [key for key, _ in MENU_OPTIONS]
 
 if "menu_key" not in st.session_state or st.session_state.menu_key not in menu_keys:
-    st.session_state.menu_key = "orcamento"
+    st.session_state.menu_key = menu_keys[0]
 
 def selecionar_menu(menu_key):
     st.session_state.menu_key = menu_key
