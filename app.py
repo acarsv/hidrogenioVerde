@@ -1152,6 +1152,64 @@ elif menu == "membros":
             """, (nome, email, hash_password(senha), papel, permissoes))
             st.success("Membro adicionado ou atualizado.")
 
+    st.markdown("### Editar membro")
+    membros_edicao = query("""
+    select nome, email, papel, permissoes, ativo
+    from usuarios_app
+    where ativo=true
+    order by nome
+    """)
+    if len(membros_edicao) == 0:
+        st.info("Nao ha membros ativos para editar.")
+    else:
+        email_editar = st.selectbox(
+            "Membro",
+            membros_edicao["email"].tolist(),
+            format_func=lambda email: f"{membros_edicao.loc[membros_edicao.email == email, 'nome'].iloc[0]} ({email})",
+            key="membro_editar_email",
+        )
+        membro_editar = membros_edicao.loc[membros_edicao.email == email_editar].iloc[0]
+        permissoes_atuais = membro_editar["permissoes"] if isinstance(membro_editar["permissoes"], list) else []
+        opcoes_papel = ["solicitante", "gerente", "compras", "admin"]
+        papel_atual = membro_editar["papel"] if membro_editar["papel"] in opcoes_papel else "solicitante"
+
+        chave_membro_edicao = email_editar.replace("@", "_").replace(".", "_")
+        nome_editado = st.text_input("Nome", value=membro_editar["nome"], key=f"membro_editar_nome_{chave_membro_edicao}")
+        papel_editado = st.selectbox(
+            "Papel",
+            opcoes_papel,
+            index=opcoes_papel.index(papel_atual),
+            key=f"membro_editar_papel_{chave_membro_edicao}",
+        )
+        opcoes_permissoes = [key for key, _ in paginas_permitidas]
+        permissoes_validas = [permissao for permissao in permissoes_atuais if permissao in opcoes_permissoes]
+        permissoes_editadas = st.multiselect(
+            "Paginas permitidas",
+            opcoes_permissoes,
+            default=permissoes_validas,
+            format_func=lambda key: dict(paginas_permitidas)[key],
+            key=f"membro_editar_permissoes_{chave_membro_edicao}",
+            disabled=papel_editado == "admin",
+        )
+        if papel_editado == "admin":
+            permissoes_editadas = [key for key, _ in ADMIN_MENU_OPTIONS]
+            st.caption("Administradores acessam todos os modulos.")
+
+        if st.button("Salvar alteracoes do membro"):
+            if not nome_editado.strip():
+                st.error("Informe o nome do membro.")
+            else:
+                execute(
+                    "update usuarios_app set nome=%s, papel=%s, permissoes=%s where email=%s",
+                    (nome_editado.strip(), papel_editado, permissoes_editadas, email_editar),
+                )
+                if email_editar == user["email"]:
+                    st.session_state.user["nome"] = nome_editado.strip()
+                    st.session_state.user["papel"] = papel_editado
+                    st.session_state.user["permissoes"] = permissoes_editadas
+                st.success("Membro atualizado.")
+                st.rerun()
+
     st.markdown("### Remover membro")
     membros_remocao = query("""
     select email, nome
