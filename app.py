@@ -500,8 +500,7 @@ def historico_orcamento_dialog():
     historico["Valor"] = historico["Valor"].apply(format_currency_brl)
     st.dataframe(historico, use_container_width=True, hide_index=True)
 
-@st.dialog("Analise da rubrica", width="large")
-def detalhe_rubrica_dialog(rubrica):
+def exibir_detalhe_rubrica(rubrica):
     detalhes = pd.DataFrame(
         [
             ("Codigo", rubrica["codigo"]),
@@ -524,15 +523,17 @@ def detalhe_rubrica_dialog(rubrica):
         ],
         columns=["Campo", "Valor"],
     )
-    st.dataframe(
-        detalhes,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Campo": st.column_config.TextColumn("Campo", width="medium"),
-            "Valor": st.column_config.TextColumn("Valor", width="large"),
-        },
-    )
+    with st.container(border=True):
+        st.markdown(f"### Analise da rubrica: {rubrica['codigo']}")
+        st.dataframe(
+            detalhes,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Campo": st.column_config.TextColumn("Campo", width="medium"),
+                "Valor": st.column_config.TextColumn("Valor", width="large"),
+            },
+        )
 
 def cancelar_solicitacao(solicitacao_id, usuario_id):
     compra = query("""
@@ -804,7 +805,7 @@ if menu == "orcamento":
         subset=["Risco"],
         axis=0,
     )
-    st.caption("Clique em uma linha da tabela para abrir a visao de analise completa da rubrica.")
+    st.caption("Clique em uma linha da tabela para abrir a visao de analise completa da rubrica abaixo.")
     evento_orcamento = st.dataframe(
         df_orcamento_visual,
         use_container_width=True,
@@ -827,7 +828,7 @@ if menu == "orcamento":
     else:
         linhas_selecionadas = getattr(selecao_orcamento, "rows", [])
     if linhas_selecionadas:
-        detalhe_rubrica_dialog(df.iloc[linhas_selecionadas[0]].to_dict())
+        exibir_detalhe_rubrica(df.iloc[linhas_selecionadas[0]].to_dict())
 
     with st.expander("Parametros de governanca por rubrica"):
         rubrica_id = st.selectbox(
