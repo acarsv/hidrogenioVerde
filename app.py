@@ -500,6 +500,40 @@ def historico_orcamento_dialog():
     historico["Valor"] = historico["Valor"].apply(format_currency_brl)
     st.dataframe(historico, use_container_width=True, hide_index=True)
 
+@st.dialog("Analise da rubrica", width="large")
+def detalhe_rubrica_dialog(rubrica):
+    detalhes = pd.DataFrame(
+        [
+            ("Codigo", rubrica["codigo"]),
+            ("Rubrica", rubrica["nome"]),
+            ("Tipo", rubrica["tipo"]),
+            ("Responsavel", rubrica.get("responsaveis") or "-"),
+            ("Valor orcado", format_currency_brl(rubrica["valor_orcado"])),
+            ("Valor reservado", format_currency_brl(rubrica["valor_reservado"])),
+            ("Valor utilizado", format_currency_brl(rubrica["valor_utilizado"])),
+            ("Reserva tecnica", format_currency_brl(rubrica["reserva_tecnica"])),
+            ("Reserva tecnica (%)", format_percent_brl(rubrica["reserva_tecnica_percentual"])),
+            ("Minimo operacional", format_currency_brl(rubrica["valor_minimo_operacional"])),
+            ("Disponivel operacional", format_currency_brl(rubrica["saldo_disponivel"])),
+            ("Saldo residual", format_currency_brl(rubrica["saldo_residual"])),
+            ("Indice comprometido", format_percent_brl(rubrica["percentual_comprometido"])),
+            ("Percentual utilizado", format_percent_brl(rubrica["percentual_utilizado"])),
+            ("Status financeiro", rubrica["status_financeiro"]),
+            ("Risco", rubrica["risco"]),
+            ("Encerrada", "Sim" if bool(rubrica["encerrada"]) else "Nao"),
+        ],
+        columns=["Campo", "Valor"],
+    )
+    st.dataframe(
+        detalhes,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Campo": st.column_config.TextColumn("Campo", width="medium"),
+            "Valor": st.column_config.TextColumn("Valor", width="large"),
+        },
+    )
+
 def cancelar_solicitacao(solicitacao_id, usuario_id):
     compra = query("""
     select c.id
@@ -770,10 +804,13 @@ if menu == "orcamento":
         subset=["Risco"],
         axis=0,
     )
-    st.dataframe(
+    st.caption("Clique em uma linha da tabela para abrir a visao de analise completa da rubrica.")
+    evento_orcamento = st.dataframe(
         df_orcamento_visual,
         use_container_width=True,
         hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
         column_config={
             "Índice comprometido": st.column_config.ProgressColumn(
                 "Índice comprometido",
@@ -784,6 +821,13 @@ if menu == "orcamento":
             "Risco": st.column_config.TextColumn("Risco", width="small"),
         },
     )
+    selecao_orcamento = getattr(evento_orcamento, "selection", {})
+    if isinstance(selecao_orcamento, dict):
+        linhas_selecionadas = selecao_orcamento.get("rows", [])
+    else:
+        linhas_selecionadas = getattr(selecao_orcamento, "rows", [])
+    if linhas_selecionadas:
+        detalhe_rubrica_dialog(df.iloc[linhas_selecionadas[0]].to_dict())
 
     with st.expander("Parametros de governanca por rubrica"):
         rubrica_id = st.selectbox(

@@ -5,3 +5,4 @@ streamlit.err.log
 streamlit.out.log
 streamlit_*.log
 streamlit_local.*.log
+usuarios_app_rows.sql
