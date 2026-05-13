@@ -302,6 +302,74 @@ def construir_planilha_itens_comprados(df: pd.DataFrame) -> bytes:
     arquivo.seek(0)
     return arquivo.getvalue()
 
+COLUNAS_AUDITORIA = {
+    "rubrica_codigo": "Rubrica",
+    "rubrica_nome": "Nome da rubrica",
+    "solicitacao_id": "Solicitação",
+    "descricao": "Descrição",
+    "tipo_item": "Tipo do item",
+    "quantidade": "Quantidade",
+    "status_solicitacao": "Status da solicitação",
+    "autorizado": "Autorizado",
+    "existe_solicitacao": "Existe solicitação",
+    "tem_valor": "Tem valor",
+    "tipo_valido": "Tipo válido",
+    "total_cotacoes": "Total de cotações",
+    "total_vencedoras": "Cotações vencedoras",
+    "fornecedor_vencedor": "Fornecedor vencedor",
+    "tem_cotacao": "Tem cotação",
+    "tem_vencedor": "Tem vencedor",
+    "valor_bate": "Valor confere",
+    "notas_fiscais": "Notas fiscais",
+    "fornecedores_nf": "Fornecedor da NF",
+    "total_itens_nf": "Itens na NF",
+    "tem_arquivo_nf": "Local/link da NF informado",
+    "tem_item_nf": "Tem item na NF",
+    "valor_nf_bate": "Valor da NF confere",
+    "fornecedor_bate": "Fornecedor confere",
+    "patrimonio_id": "Patrimônio",
+    "estoque_id": "Estoque",
+    "atesto_id": "Atesto",
+    "status_auditoria": "Status da auditoria",
+    "destino_correto": "Destino correto",
+    "saldo_inicial": "Saldo inicial",
+    "valor_solicitado": "Valor solicitado",
+    "valor_autorizado": "Valor autorizado",
+    "valor_empenhado_comprado": "Valor empenhado/comprado",
+    "valor_reservado": "Valor reservado",
+    "valor_utilizado": "Valor utilizado",
+    "saldo_restante": "Saldo restante",
+    "valor_cotado_vencedor": "Valor cotado vencedor",
+    "valor_nf_item": "Valor do item na NF",
+    "valor_nota": "Valor da nota",
+    "valor_itens": "Valor dos itens",
+    "diferenca": "Diferença",
+    "numero_nf": "Número da NF",
+    "fornecedor": "Fornecedor",
+    "status_conferencia": "Status da conferência",
+}
+
+COLUNAS_VALOR_AUDITORIA = {
+    "Saldo inicial",
+    "Valor solicitado",
+    "Valor autorizado",
+    "Valor empenhado/comprado",
+    "Valor reservado",
+    "Valor utilizado",
+    "Saldo restante",
+    "Valor cotado vencedor",
+    "Valor do item na NF",
+    "Valor da nota",
+    "Valor dos itens",
+    "Diferença",
+}
+
+def preparar_tabela_auditoria(df: pd.DataFrame) -> pd.DataFrame:
+    tabela = df.rename(columns=COLUNAS_AUDITORIA).copy()
+    for coluna in COLUNAS_VALOR_AUDITORIA.intersection(tabela.columns):
+        tabela[coluna] = tabela[coluna].apply(format_currency_brl)
+    return tabela
+
 @st.dialog("Atualizar responsáveis")
 def atualizar_responsaveis_dialog():
     rubricas = query("""
@@ -1496,18 +1564,9 @@ elif menu == "auditoria":
                     .reset_index()
                 )
                 st.dataframe(
-                    rubrica_resumo,
+                    preparar_tabela_auditoria(rubrica_resumo),
                     use_container_width=True,
                     hide_index=True,
-                    column_config={
-                        "saldo_inicial": st.column_config.NumberColumn("Saldo inicial", format="R$ %.2f"),
-                        "valor_solicitado": st.column_config.NumberColumn("Valor solicitado", format="R$ %.2f"),
-                        "valor_autorizado": st.column_config.NumberColumn("Valor autorizado", format="R$ %.2f"),
-                        "valor_empenhado_comprado": st.column_config.NumberColumn("Valor empenhado/comprado", format="R$ %.2f"),
-                        "valor_reservado": st.column_config.NumberColumn("Valor reservado", format="R$ %.2f"),
-                        "valor_utilizado": st.column_config.NumberColumn("Valor utilizado", format="R$ %.2f"),
-                        "saldo_restante": st.column_config.NumberColumn("Saldo restante", format="R$ %.2f"),
-                    },
                 )
 
             with st.expander("2. Solicitações", expanded=True):
@@ -1523,7 +1582,7 @@ elif menu == "auditoria":
                 solicitacoes_auditoria["existe_solicitacao"] = solicitacoes_auditoria["solicitacao_id"].notna()
                 solicitacoes_auditoria["tem_valor"] = solicitacoes_auditoria["valor_solicitado"].fillna(0) > 0
                 solicitacoes_auditoria["tipo_valido"] = solicitacoes_auditoria["tipo_item"].isin(["permanente", "consumo", "servico"])
-                st.dataframe(solicitacoes_auditoria, use_container_width=True, hide_index=True)
+                st.dataframe(preparar_tabela_auditoria(solicitacoes_auditoria), use_container_width=True, hide_index=True)
 
             with st.expander("3. Cotações", expanded=True):
                 cotacoes_auditoria = auditoria[[
@@ -1541,7 +1600,7 @@ elif menu == "auditoria":
                     cotacoes_auditoria["valor_cotado_vencedor"].fillna(0)
                     - cotacoes_auditoria["valor_solicitado"].fillna(0)
                 ).abs() <= 0.01
-                st.dataframe(cotacoes_auditoria, use_container_width=True, hide_index=True)
+                st.dataframe(preparar_tabela_auditoria(cotacoes_auditoria), use_container_width=True, hide_index=True)
 
             with st.expander("4. Notas fiscais", expanded=True):
                 notas_auditoria = auditoria[[
@@ -1560,9 +1619,9 @@ elif menu == "auditoria":
                     - notas_auditoria["valor_cotado_vencedor"].fillna(0)
                 ).abs() <= 0.01
                 notas_auditoria["fornecedor_bate"] = notas_auditoria["fornecedores_nf"] == notas_auditoria["fornecedor_vencedor"]
-                st.dataframe(notas_auditoria, use_container_width=True, hide_index=True)
+                st.dataframe(preparar_tabela_auditoria(notas_auditoria), use_container_width=True, hide_index=True)
                 st.markdown("#### Conferência NF x itens")
-                st.dataframe(conferencia_nf, use_container_width=True, hide_index=True)
+                st.dataframe(preparar_tabela_auditoria(conferencia_nf), use_container_width=True, hide_index=True)
 
             with st.expander("5. Destino final", expanded=True):
                 destino_auditoria = auditoria[[
@@ -1578,7 +1637,7 @@ elif menu == "auditoria":
                     | ((destino_auditoria["tipo_item"] == "consumo") & destino_auditoria["estoque_id"].notna())
                     | ((destino_auditoria["tipo_item"] == "servico") & destino_auditoria["atesto_id"].notna())
                 )
-                st.dataframe(destino_auditoria, use_container_width=True, hide_index=True)
+                st.dataframe(preparar_tabela_auditoria(destino_auditoria), use_container_width=True, hide_index=True)
 
             with st.expander("6. Inconsistências", expanded=True):
                 problemas = auditoria[auditoria["status_auditoria"] != "OK"].copy()
@@ -1587,7 +1646,7 @@ elif menu == "auditoria":
                 else:
                     st.error("Auditoria concluída com pendências.")
                     st.dataframe(
-                        problemas[[
+                        preparar_tabela_auditoria(problemas[[
                             "rubrica_codigo",
                             "solicitacao_id",
                             "descricao",
@@ -1596,13 +1655,13 @@ elif menu == "auditoria":
                             "valor_cotado_vencedor",
                             "valor_nf_item",
                             "status_auditoria",
-                        ]],
+                        ]]),
                         use_container_width=True,
                         hide_index=True,
                     )
 
             st.markdown("### Dados completos da auditoria")
-            st.dataframe(auditoria, use_container_width=True, hide_index=True)
+            st.dataframe(preparar_tabela_auditoria(auditoria), use_container_width=True, hide_index=True)
 
 elif menu == "itens_comprados":
     df = query("""
