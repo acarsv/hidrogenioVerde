@@ -303,6 +303,7 @@ def construir_planilha_itens_comprados(df: pd.DataFrame) -> bytes:
     return arquivo.getvalue()
 
 COLUNAS_AUDITORIA = {
+    "pedido_item_id": "Item do pedido (ID)",
     "rubrica_codigo": "Rubrica",
     "rubrica_nome": "Nome da rubrica",
     "solicitacao_id": "Solicitação",
@@ -620,6 +621,104 @@ def cancelar_solicitacao(solicitacao_id, usuario_id):
     execute("update cotacoes set vencedora=false where solicitacao_id=%s", (solicitacao_id,))
     execute("update solicitacoes_compra set status='cancelado', autorizado=false, atualizado_em=now() where id=%s", (solicitacao_id,))
     execute("insert into historico_status (solicitacao_id,status_novo,usuario_id,observacao) values (%s,'cancelado',%s,'Solicitação cancelada')", (solicitacao_id, usuario_id))
+
+    sincronizar_orcamento()
+
+def voltar_item_para_cotacao(pedido_item_id, usuario_id):
+    conn = get_conn()
+    conn.autocommit = False
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+            select pi.id, pi.pedido_id, pi.descricao
+            from pedido_itens pi
+            where pi.id=%s
+            """, (pedido_item_id,))
+            item = cur.fetchone()
+            if not item:
+                raise ValueError("Item do pedido nao encontrado.")
+
+            solicitacao_id = int(item["pedido_id"])
+            descricao_item = item["descricao"]
+
+            cur.execute("""
+            delete from patrimonio
+            where nota_fiscal_item_id in (
+                select id from nota_fiscal_itens where pedido_item_id=%s
+            )
+            """, (pedido_item_id,))
+            cur.execute("""
+            delete from estoque_consumo
+            where nota_fiscal_item_id in (
+                select id from nota_fiscal_itens where pedido_item_id=%s
+            )
+            """, (pedido_item_id,))
+            cur.execute("""
+            delete from atesto_servico
+            where nota_fiscal_item_id in (
+                select id from nota_fiscal_itens where pedido_item_id=%s
+            )
+            """, (pedido_item_id,))
+
+            cur.execute("select distinct nota_fiscal_id from nota_fiscal_itens where pedido_item_id=%s", (pedido_item_id,))
+            notas_afetadas = [row["nota_fiscal_id"] for row in cur.fetchall()]
+            cur.execute("delete from nota_fiscal_itens where pedido_item_id=%s", (pedido_item_id,))
+            if notas_afetadas:
+                cur.execute("""
+                delete from notas_fiscais nf
+                where nf.id = any(%s)
+                  and not exists (
+                      select 1 from nota_fiscal_itens nfi where nfi.nota_fiscal_id = nf.id
+                  )
+                """, (notas_afetadas,))
+
+            cur.execute("update cotacao_itens set vencedor=false where pedido_item_id=%s", (pedido_item_id,))
+            cur.execute("""
+            update cotacoes c
+            set vencedora = exists (
+                select 1
+                from cotacao_itens ci
+                where ci.cotacao_id = c.id and ci.vencedor = true
+            )
+            where c.solicitacao_id=%s
+            """, (solicitacao_id,))
+            cur.execute("update pedido_itens set status='em_cotacao' where id=%s", (pedido_item_id,))
+
+            cur.execute("""
+            select coalesce(sum(nfi.valor_total), 0) as valor_total_real
+            from nota_fiscal_itens nfi
+            join pedido_itens pi on pi.id = nfi.pedido_item_id
+            where pi.pedido_id=%s
+            """, (solicitacao_id,))
+            valor_total_real = Decimal(str(cur.fetchone()["valor_total_real"]))
+            if valor_total_real > 0:
+                cur.execute("""
+                update compras
+                set valor_compra=%s
+                where solicitacao_id=%s
+                """, (valor_total_real, solicitacao_id))
+            else:
+                cur.execute("delete from compras where solicitacao_id=%s", (solicitacao_id,))
+
+            cur.execute("""
+            update solicitacoes_compra
+            set status='cotado', atualizado_em=now()
+            where id=%s
+            """, (solicitacao_id,))
+            cur.execute("""
+            insert into historico_status (solicitacao_id,status_novo,usuario_id,observacao)
+            values (%s,'cotado',%s,%s)
+            """, (
+                solicitacao_id,
+                usuario_id,
+                f"Item retornado para cotacao: {descricao_item}",
+            ))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
     sincronizar_orcamento()
 
@@ -1699,6 +1798,7 @@ elif menu == "auditoria":
                     st.error("Auditoria concluída com pendências.")
                     st.dataframe(
                         preparar_tabela_auditoria(problemas[[
+                            "pedido_item_id",
                             "rubrica_codigo",
                             "solicitacao_id",
                             "descricao",
@@ -1712,6 +1812,36 @@ elif menu == "auditoria":
                         use_container_width=True,
                         hide_index=True,
                     )
+                    problemas_retorno = problemas[
+                        problemas["status_auditoria"].str.contains(
+                            "valor cotado maior|valor da NF maior|fornecedor da NF diverge|mais de um vencedor",
+                            case=False,
+                            na=False,
+                        )
+                    ].copy()
+                    if not problemas_retorno.empty:
+                        st.markdown("#### Corrigir item")
+                        item_corrigir_id = st.selectbox(
+                            "Item que deve voltar para cotação",
+                            problemas_retorno["pedido_item_id"].tolist(),
+                            format_func=lambda item_id: (
+                                f"Solicitação {problemas_retorno.loc[problemas_retorno.pedido_item_id == item_id, 'solicitacao_id'].iloc[0]} - "
+                                f"{problemas_retorno.loc[problemas_retorno.pedido_item_id == item_id, 'descricao'].iloc[0]} - "
+                                f"{problemas_retorno.loc[problemas_retorno.pedido_item_id == item_id, 'status_auditoria'].iloc[0]}"
+                            ),
+                            key="auditoria_item_corrigir",
+                        )
+                        confirmar_retorno = st.checkbox(
+                            "Confirmo voltar este item para cotação e desfazer NF/destino final associados.",
+                            key="confirmar_voltar_item_cotacao",
+                        )
+                        if st.button("Voltar item para cotação", type="primary"):
+                            if not confirmar_retorno:
+                                st.error("Marque a confirmação antes de voltar o item para cotação.")
+                            else:
+                                voltar_item_para_cotacao(item_corrigir_id, user["id"])
+                                st.success("Item voltou para cotação. Revise a cotação vencedora e lance a NF novamente.")
+                                st.rerun()
 
             st.markdown("### Dados completos da auditoria")
             st.dataframe(preparar_tabela_auditoria(auditoria), use_container_width=True, hide_index=True)
