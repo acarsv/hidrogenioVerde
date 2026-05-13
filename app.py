@@ -561,8 +561,7 @@ def sincronizar_orcamento():
     from (
         select rubrica_id, coalesce(sum(valor_estimado), 0) as valor_total
         from solicitacoes_compra
-        where autorizado = true
-          and status in ('em_andamento', 'cotado', 'aguardando_nota')
+        where status in ('solicitacao', 'em_andamento', 'cotado', 'aguardando_nota')
         group by rubrica_id
     ) totais
     where r.id = totais.rubrica_id
@@ -865,6 +864,7 @@ if menu == "orcamento":
             st.rerun()
 
 elif menu == "nova_exigencia":
+    sincronizar_orcamento()
     rubricas = query("select id, codigo || ' - ' || nome as label, saldo_disponivel from vw_orcamento where encerrada = false order by codigo")
     if len(rubricas) == 0:
         st.info("Não há rubricas abertas para novas solicitações.")
@@ -940,6 +940,7 @@ elif menu == "nova_exigencia":
                     Decimal(str(item["valor_unitario"])),
                     str(item.get("observacoes") or "").strip() or None,
                 ))
+            sincronizar_orcamento()
             st.session_state.nova_exigencia_sucesso = f"Solicitação #{solicitacao_id} registrada com {len(itens_validos)} item(ns)."
             st.session_state.nova_exigencia_form_version += 1
             st.rerun()
@@ -980,12 +981,14 @@ elif menu == "solicitacoes":
                 elif not bool(existe.iloc[0]["autorizado"]):
                     valor_autorizacao = Decimal(str(existe.iloc[0]["valor_estimado"]))
                     rubrica_autorizacao_id = int(existe.iloc[0]["rubrica_id"])
-                    excede_saldo, saldo_disponivel = excede_saldo_disponivel(rubrica_autorizacao_id, valor_autorizacao)
-                    if excede_saldo:
+                    saldo_df = query("select saldo_disponivel from vw_orcamento where id=%s", (rubrica_autorizacao_id,))
+                    saldo_disponivel = Decimal(str(saldo_df.iloc[0]["saldo_disponivel"])) if len(saldo_df) == 1 else Decimal("0")
+                    saldo_disponivel_para_autorizacao = saldo_disponivel + valor_autorizacao
+                    if valor_autorizacao > saldo_disponivel_para_autorizacao:
                         st.error(
                             "Solicitação não autorizada. "
                             f"O valor estimado ({format_currency_brl_markdown(valor_autorizacao)}) "
-                            f"supera o disponível operacional da rubrica ({format_currency_brl_markdown(saldo_disponivel)})."
+                            f"supera o disponível operacional da rubrica ({format_currency_brl_markdown(saldo_disponivel_para_autorizacao)})."
                         )
                     else:
                         execute("update solicitacoes_compra set autorizado=true, gerente_id=%s, autorizado_em=now(), status='em_andamento' where id=%s", (user["id"], sid))
