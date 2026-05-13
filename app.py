@@ -180,7 +180,7 @@ def ensure_permissions_schema():
 
     execute("""
     update usuarios_app
-    set permissoes = array['orcamento','nova_exigencia','solicitacoes','cotacoes','compra_nota','itens_comprados','membros']
+    set permissoes = array['orcamento','nova_exigencia','solicitacoes','cotacoes','compra_nota','destino_final','itens_comprados','membros']
     where papel = 'admin' and (permissoes is null or cardinality(permissoes) = 0)
     """)
 
@@ -623,6 +623,7 @@ BASE_MENU_OPTIONS = [
     ("solicitacoes", "Solicitações"),
     ("cotacoes", "Cotações"),
     ("compra_nota", "Compra e nota fiscal"),
+    ("destino_final", "Destino final"),
     ("itens_comprados", "Itens comprados"),
 ]
 ADMIN_MENU_OPTIONS = BASE_MENU_OPTIONS + [("membros", "Membros")]
@@ -1304,6 +1305,134 @@ elif menu == "compra_nota":
                 else:
                     st.success("Nota fiscal lançada. Ainda há itens pendentes de NF.")
                 sincronizar_orcamento()
+
+elif menu == "destino_final":
+    itens_destino = query("""
+    select
+      nfi.id,
+      s.id as solicitacao,
+      r.codigo as rubrica,
+      nfi.descricao,
+      nfi.tipo_item,
+      nfi.quantidade,
+      nfi.valor_total,
+      nf.numero_nf,
+      nf.fornecedor,
+      case
+        when p.id is not null then 'patrimonio'
+        when e.id is not null then 'estoque'
+        when a.id is not null then 'atesto'
+        else 'pendente'
+      end as destino
+    from nota_fiscal_itens nfi
+    join notas_fiscais nf on nf.id = nfi.nota_fiscal_id
+    join pedido_itens pi on pi.id = nfi.pedido_item_id
+    join solicitacoes_compra s on s.id = pi.pedido_id
+    join rubricas r on r.id = pi.rubrica_id
+    left join patrimonio p on p.nota_fiscal_item_id = nfi.id
+    left join estoque_consumo e on e.nota_fiscal_item_id = nfi.id
+    left join atesto_servico a on a.nota_fiscal_item_id = nfi.id
+    order by nf.lancado_em desc nulls last, nf.numero_nf, nfi.descricao
+    """)
+    if len(itens_destino) == 0:
+        st.info("Ainda não há itens de nota fiscal para classificar.")
+    else:
+        pendentes = itens_destino[itens_destino["destino"] == "pendente"].copy()
+        st.metric("Itens pendentes de destino", len(pendentes))
+        st.dataframe(
+            itens_destino.rename(columns={
+                "solicitacao": "Solicitação",
+                "rubrica": "Rubrica",
+                "descricao": "Item",
+                "tipo_item": "Tipo",
+                "quantidade": "Quantidade",
+                "valor_total": "Valor total",
+                "numero_nf": "NF",
+                "fornecedor": "Fornecedor",
+                "destino": "Destino",
+            }),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Valor total": st.column_config.NumberColumn("Valor total", format="R$ %.2f"),
+            },
+        )
+
+        if len(pendentes) == 0:
+            st.success("Todos os itens de nota fiscal já têm destino final.")
+        else:
+            st.markdown("### Classificação final do item")
+            item_id = st.selectbox(
+                "Item da nota fiscal",
+                pendentes["id"].tolist(),
+                format_func=lambda item_id: (
+                    f"{pendentes.loc[pendentes.id == item_id, 'numero_nf'].iloc[0]} - "
+                    f"{pendentes.loc[pendentes.id == item_id, 'descricao'].iloc[0]} "
+                    f"({pendentes.loc[pendentes.id == item_id, 'tipo_item'].iloc[0]})"
+                ),
+                key="destino_final_item_id",
+            )
+            item = pendentes.loc[pendentes.id == item_id].iloc[0]
+            st.caption(
+                f"Tipo: {item['tipo_item']} | Quantidade: {format_brl(item['quantidade'])} | "
+                f"Valor: {format_currency_brl_markdown(item['valor_total'])}"
+            )
+
+            if item["tipo_item"] == "permanente":
+                numero_patrimonio = st.text_input("Número de patrimônio", key=f"pat_numero_{item_id}")
+                localizacao = st.text_input("Localização", key=f"pat_local_{item_id}")
+                responsavel = st.text_input("Responsável", key=f"pat_resp_{item_id}")
+                estado = st.selectbox("Estado", ["ativo", "manutencao", "baixado"], key=f"pat_estado_{item_id}")
+                observacoes = st.text_area("Observações", key=f"pat_obs_{item_id}")
+                if st.button("Registrar patrimônio", type="primary"):
+                    execute("""
+                    insert into patrimonio
+                      (nota_fiscal_item_id, numero_patrimonio, localizacao, responsavel, estado, observacoes)
+                    values (%s,%s,%s,%s,%s,%s)
+                    """, (item_id, numero_patrimonio, localizacao, responsavel, estado, observacoes))
+                    st.success("Item registrado como patrimônio.")
+                    st.rerun()
+
+            elif item["tipo_item"] == "consumo":
+                quantidade_entrada = Decimal(str(item["quantidade"]))
+                st.number_input("Quantidade de entrada", value=float(quantidade_entrada), disabled=True, key=f"est_qtd_{item_id}")
+                unidade = st.text_input("Unidade", value="un", key=f"est_un_{item_id}")
+                local_armazenamento = st.text_input("Local de armazenamento", key=f"est_local_{item_id}")
+                responsavel = st.text_input("Responsável", key=f"est_resp_{item_id}")
+                observacoes = st.text_area("Observações", key=f"est_obs_{item_id}")
+                if st.button("Registrar estoque", type="primary"):
+                    execute("""
+                    insert into estoque_consumo
+                      (nota_fiscal_item_id, quantidade_entrada, quantidade_disponivel, unidade, local_armazenamento, responsavel, observacoes)
+                    values (%s,%s,%s,%s,%s,%s,%s)
+                    """, (item_id, quantidade_entrada, quantidade_entrada, unidade, local_armazenamento, responsavel, observacoes))
+                    st.success("Item registrado no estoque de consumo.")
+                    st.rerun()
+
+            elif item["tipo_item"] == "servico":
+                descricao_execucao = st.text_area("Descrição da execução", key=f"serv_desc_{item_id}")
+                responsavel_atesto = st.text_input("Responsável pelo atesto", key=f"serv_resp_{item_id}")
+                data_atesto = st.date_input("Data do atesto", value=date.today(), key=f"serv_data_{item_id}")
+                documento_url = st.text_input("URL do documento de comprovação", key=f"serv_doc_{item_id}")
+                observacoes = st.text_area("Observações", key=f"serv_obs_{item_id}")
+                if st.button("Registrar atesto de serviço", type="primary"):
+                    if not descricao_execucao.strip():
+                        st.error("Informe a descrição da execução do serviço.")
+                    else:
+                        execute("""
+                        insert into atesto_servico
+                          (nota_fiscal_item_id, descricao_execucao, responsavel_atesto, data_atesto, documento_comprovacao_url, observacoes)
+                        values (%s,%s,%s,%s,%s,%s)
+                        """, (
+                            item_id,
+                            descricao_execucao,
+                            responsavel_atesto,
+                            data_atesto,
+                            documento_url.strip() or None,
+                            observacoes,
+                        ))
+                        st.success("Atesto de serviço registrado.")
+                        st.rerun()
 
 elif menu == "itens_comprados":
     df = query("""
