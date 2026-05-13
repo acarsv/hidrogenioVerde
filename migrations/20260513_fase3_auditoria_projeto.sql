@@ -108,8 +108,8 @@ select
         when coalesce(nr.total_itens_nf, 0) = 0
             then 'PENDENTE: item sem nota fiscal'
 
-        when abs(coalesce(nr.valor_total_nf_item, 0) - coalesce(cr.valor_cotado_vencedor, 0)) > 0.01
-            then 'ERRO: valor da NF diverge da cotacao vencedora'
+        when coalesce(nr.valor_total_nf_item, 0) - coalesce(cr.valor_cotado_vencedor, 0) > 0.01
+            then 'ERRO: valor da NF maior que cotacao vencedora'
 
         when nr.fornecedores_nf is distinct from cr.fornecedor_vencedor
             then 'ERRO: fornecedor da NF diverge do vencedor'

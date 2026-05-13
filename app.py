@@ -1326,17 +1326,41 @@ elif menu == "compra_nota":
             numero_nf = st.text_input("Número da NF")
             fornecedor_nf = st.text_input("Fornecedor da NF", value=fornecedor_padrao)
             local_nf = st.text_input("Local/link da NF no Google Drive")
-            valor_nf = st.number_input("Valor da NF", min_value=0.0, value=valor_nf_padrao, key=f"nota_valor_nf_{compra_id}_{valor_nf_padrao:.2f}")
             if len(itens_nf_df):
-                st.dataframe(
-                    itens_nf_df[["descricao", "fornecedor", "quantidade", "valor_unitario", "valor_total"]],
+                itens_nf_editor = itens_nf_df[["pedido_item_id", "descricao", "fornecedor", "tipo_item", "quantidade", "valor_unitario"]].copy()
+                itens_nf_editor = itens_nf_editor.rename(columns={
+                    "descricao": "Item",
+                    "fornecedor": "Fornecedor",
+                    "tipo_item": "Tipo",
+                    "quantidade": "Quantidade",
+                    "valor_unitario": "Valor unitario NF",
+                })
+                itens_nf_editor = st.data_editor(
+                    itens_nf_editor,
                     use_container_width=True,
                     hide_index=True,
+                    disabled=["pedido_item_id", "Item", "Fornecedor", "Tipo", "Quantidade"],
                     column_config={
-                        "valor_unitario": st.column_config.NumberColumn("Valor unitario", format="R$ %.2f"),
-                        "valor_total": st.column_config.NumberColumn("Valor total", format="R$ %.2f"),
+                        "pedido_item_id": None,
+                        "Valor unitario NF": st.column_config.NumberColumn("Valor unitario NF", min_value=0.0, format="R$ %.2f"),
                     },
+                    key=f"nota_itens_valores_{compra_id}_{len(itens_nf_df)}",
                 )
+                itens_nf_editor["Quantidade"] = pd.to_numeric(itens_nf_editor["Quantidade"], errors="coerce").fillna(0)
+                itens_nf_editor["Valor unitario NF"] = pd.to_numeric(itens_nf_editor["Valor unitario NF"], errors="coerce").fillna(0)
+                itens_nf_editor["Valor total NF"] = itens_nf_editor["Quantidade"] * itens_nf_editor["Valor unitario NF"]
+                valor_nf_padrao = float(itens_nf_editor["Valor total NF"].sum())
+                st.dataframe(
+                    preparar_tabela_auditoria(itens_nf_editor[["Item", "Fornecedor", "Quantidade", "Valor unitario NF", "Valor total NF"]].rename(columns={
+                        "Valor unitario NF": "Valor do item na NF",
+                        "Valor total NF": "Valor da nota",
+                    })),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                itens_nf_editor = pd.DataFrame()
+            valor_nf = st.number_input("Valor da NF", min_value=0.0, value=valor_nf_padrao, key=f"nota_valor_nf_{compra_id}_{valor_nf_padrao:.2f}")
         data_nf = st.date_input("Data de emissão", value=date.today())
         if st.button("Consolidar nota e finalizar"):
             if len(itens_pendentes) == 0:
@@ -1379,7 +1403,12 @@ elif menu == "compra_nota":
                     returning id
                     """, (compra_id, sid, numero_nf, fornecedor_nf, valor_nf, data_nf, local_nf.strip(), user["id"]))
                     nota_id = int(nota_criada.iloc[0]["id"])
-                for _, item_nf in itens_nf_df.iterrows():
+                itens_nf_gravacao = itens_nf_df.merge(
+                    itens_nf_editor[["pedido_item_id", "Valor unitario NF"]],
+                    on="pedido_item_id",
+                    how="left",
+                )
+                for _, item_nf in itens_nf_gravacao.iterrows():
                     execute("""
                     insert into nota_fiscal_itens
                       (nota_fiscal_id, pedido_item_id, descricao, tipo_item, quantidade, valor_unitario)
@@ -1390,11 +1419,19 @@ elif menu == "compra_nota":
                         item_nf["descricao"],
                         item_nf["tipo_item"],
                         Decimal(str(item_nf["quantidade"])),
-                        Decimal(str(item_nf["valor_unitario"])),
+                        Decimal(str(item_nf["Valor unitario NF"])),
                     ))
                 total_itens = len(itens_vencedores)
                 total_lancado = len(ids_lancados) + len(itens_nf_df)
                 if total_lancado >= total_itens:
+                    total_real_nf = query("""
+                    select coalesce(sum(nfi.valor_total), 0) as valor_total_real
+                    from nota_fiscal_itens nfi
+                    join pedido_itens pi on pi.id = nfi.pedido_item_id
+                    where pi.pedido_id=%s
+                    """, (sid,))
+                    valor_total_real = Decimal(str(total_real_nf.iloc[0]["valor_total_real"])) if len(total_real_nf) else Decimal("0")
+                    execute("update compras set valor_compra=%s where id=%s", (valor_total_real, compra_id))
                     execute("update solicitacoes_compra set status='finalizado' where id=%s", (sid,))
                     st.success("Nota fiscal lançada. Todos os itens foram conferidos e a compra foi finalizada.")
                 else:
