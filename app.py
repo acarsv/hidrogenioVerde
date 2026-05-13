@@ -935,12 +935,24 @@ if menu == "orcamento":
 
 elif menu == "nova_exigencia":
     sincronizar_orcamento()
-    rubricas = query("select id, codigo || ' - ' || nome as label, saldo_disponivel from vw_orcamento where encerrada = false order by codigo")
+    rubricas = query("""
+    select v.id, v.codigo || ' - ' || v.nome as label, v.saldo_disponivel, r.tipo
+    from vw_orcamento v
+    join rubricas r on r.id = v.id
+    where v.encerrada = false
+    order by v.codigo
+    """)
     if len(rubricas) == 0:
         st.info("Não há rubricas abertas para novas solicitações.")
         st.stop()
     rubrica_label = st.selectbox("Rubrica/categoria", rubricas["label"])
     rubrica_id = int(rubricas.loc[rubricas["label"] == rubrica_label, "id"].iloc[0])
+    tipo_rubrica = rubricas.loc[rubricas["label"] == rubrica_label, "tipo"].iloc[0]
+    tipo_item_padrao = {
+        "material_consumo": "consumo",
+        "material_permanente": "permanente",
+        "servico_pf": "servico",
+    }.get(tipo_rubrica, "permanente")
     saldo_atual = Decimal(str(rubricas.loc[rubricas["label"] == rubrica_label, "saldo_disponivel"].iloc[0]))
     st.caption(f"Disponível operacional: {format_currency_brl_markdown(saldo_atual)}")
     if "nova_exigencia_form_version" not in st.session_state:
@@ -952,7 +964,7 @@ elif menu == "nova_exigencia":
     descricao = st.text_area("Resumo do pedido/requerimento", key=f"nova_descricao_{form_version}")
     st.markdown("### Itens do pedido")
     itens_base = pd.DataFrame(
-        [{"descricao": "", "tipo_item": "permanente", "quantidade": 1.0, "valor_unitario": 0.0, "observacoes": ""}]
+        [{"descricao": "", "tipo_item": tipo_item_padrao, "quantidade": 1.0, "valor_unitario": 0.0, "observacoes": ""}]
     )
     itens_editados = st.data_editor(
         itens_base,
@@ -966,7 +978,7 @@ elif menu == "nova_exigencia":
             "valor_unitario": st.column_config.NumberColumn("Valor unitario", min_value=0.0, format="R$ %.2f"),
             "observacoes": st.column_config.TextColumn("Observacoes"),
         },
-        key=f"nova_exigencia_itens_{form_version}",
+        key=f"nova_exigencia_itens_{form_version}_{rubrica_id}",
     )
     itens_validos = itens_editados[itens_editados["descricao"].fillna("").str.strip() != ""].copy()
     if len(itens_validos):
