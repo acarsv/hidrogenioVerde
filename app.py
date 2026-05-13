@@ -934,10 +934,6 @@ st.markdown(
 )
 
 if menu == "orcamento":
-    if st.button("Solicitar compra"):
-        st.session_state.menu_key = "nova_exigencia"
-        st.rerun()
-
     if user["papel"] in ["admin", "gerente"]:
         c_recalcular, c_responsaveis, c_reservar, c_remanejar, c_encerrar, c_historico = st.columns(6)
         if c_recalcular.button("Recalcular orçamento"):
