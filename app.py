@@ -1231,9 +1231,9 @@ elif menu == "compra_nota":
         itens_lancados = query("""
         select pedido_item_id
         from nota_fiscal_itens nfi
-        join notas_fiscais nf on nf.id = nfi.nota_fiscal_id
-        where nf.compra_id=%s and nfi.pedido_item_id is not null
-        """, (compra_id,))
+        join pedido_itens pi on pi.id = nfi.pedido_item_id
+        where pi.pedido_id=%s and nfi.pedido_item_id is not null
+        """, (sid,))
         ids_lancados = set(itens_lancados["pedido_item_id"].tolist()) if len(itens_lancados) else set()
         itens_pendentes = itens_vencedores[~itens_vencedores["pedido_item_id"].isin(ids_lancados)].copy()
 
@@ -1274,17 +1274,39 @@ elif menu == "compra_nota":
                 st.info("Não há itens pendentes para lançar.")
             elif len(itens_nf_df) == 0:
                 st.error("Selecione pelo menos um item para a nota fiscal.")
+            elif itens_nf_df["fornecedor"].nunique() != 1:
+                st.error("Uma NF deve conter itens de um único fornecedor vencedor.")
             elif not numero_nf.strip() or not fornecedor_nf.strip():
                 st.error("Informe número da NF e fornecedor.")
+            elif fornecedor_nf.strip().lower() != str(itens_nf_df["fornecedor"].iloc[0]).strip().lower():
+                st.error("O fornecedor da NF deve ser o mesmo fornecedor vencedor dos itens selecionados.")
             elif Decimal(str(valor_nf)) != Decimal(str(valor_nf_padrao)):
                 st.error("O valor da NF deve bater com a soma dos itens selecionados.")
             else:
-                nota_criada = query("""
-                insert into notas_fiscais (compra_id, solicitacao_id, numero_nf, fornecedor, valor_nf, data_emissao, lancado_por)
-                values (%s,%s,%s,%s,%s,%s,%s)
-                returning id
-                """, (compra_id, sid, numero_nf, fornecedor_nf, valor_nf, data_nf, user["id"]))
-                nota_id = int(nota_criada.iloc[0]["id"])
+                nota_existente = query("""
+                select id, valor_nf
+                from notas_fiscais
+                where lower(trim(numero_nf)) = lower(trim(%s))
+                  and lower(trim(fornecedor)) = lower(trim(%s))
+                limit 1
+                """, (numero_nf, fornecedor_nf))
+                if len(nota_existente):
+                    nota_id = int(nota_existente.iloc[0]["id"])
+                    valor_nf_atualizado = Decimal(str(nota_existente.iloc[0]["valor_nf"])) + Decimal(str(valor_nf))
+                    execute("""
+                    update notas_fiscais
+                    set valor_nf=%s,
+                        data_emissao=coalesce(data_emissao, %s),
+                        lancado_por=coalesce(lancado_por, %s)
+                    where id=%s
+                    """, (valor_nf_atualizado, data_nf, user["id"], nota_id))
+                else:
+                    nota_criada = query("""
+                    insert into notas_fiscais (compra_id, solicitacao_id, numero_nf, fornecedor, valor_nf, data_emissao, lancado_por)
+                    values (%s,%s,%s,%s,%s,%s,%s)
+                    returning id
+                    """, (compra_id, sid, numero_nf, fornecedor_nf, valor_nf, data_nf, user["id"]))
+                    nota_id = int(nota_criada.iloc[0]["id"])
                 for _, item_nf in itens_nf_df.iterrows():
                     execute("""
                     insert into nota_fiscal_itens
