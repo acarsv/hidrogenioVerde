@@ -1682,6 +1682,9 @@ elif menu == "destino_final":
 elif menu == "auditoria":
     st.caption("Raio X da prestação de contas: pedido, autorização, cotação, nota fiscal, destino final e saldo da rubrica.")
     if st.button("Executar auditoria do projeto", type="primary"):
+        st.session_state["auditoria_executada"] = True
+
+    if st.session_state.get("auditoria_executada"):
         sincronizar_orcamento()
         auditoria = query("select * from vw_auditoria_itens_projeto order by rubrica_codigo, solicitacao_id, descricao")
         conferencia_nf = query("select * from vw_conferencia_notas_fiscais order by numero_nf")
