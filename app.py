@@ -341,6 +341,7 @@ COLUNAS_AUDITORIA = {
     "saldo_restante": "Saldo restante",
     "valor_cotado_vencedor": "Valor cotado vencedor",
     "valor_nf_item": "Valor do item na NF",
+    "valor_economia": "Valor economizado",
     "valor_nota": "Valor da nota",
     "valor_itens": "Valor dos itens",
     "diferenca": "Diferença",
@@ -359,6 +360,7 @@ COLUNAS_VALOR_AUDITORIA = {
     "Saldo restante",
     "Valor cotado vencedor",
     "Valor do item na NF",
+    "Valor economizado",
     "Valor da nota",
     "Valor dos itens",
     "Diferença",
@@ -1642,6 +1644,7 @@ elif menu == "auditoria":
                     "fornecedor_vencedor",
                     "valor_solicitado",
                     "valor_cotado_vencedor",
+                    "valor_economia",
                 ]].copy()
                 cotacoes_auditoria["tem_cotacao"] = cotacoes_auditoria["total_cotacoes"] > 0
                 cotacoes_auditoria["tem_vencedor"] = cotacoes_auditoria["total_vencedoras"] == 1
@@ -1703,6 +1706,7 @@ elif menu == "auditoria":
                             "valor_solicitado",
                             "valor_cotado_vencedor",
                             "valor_nf_item",
+                            "valor_economia",
                             "status_auditoria",
                         ]]),
                         use_container_width=True,

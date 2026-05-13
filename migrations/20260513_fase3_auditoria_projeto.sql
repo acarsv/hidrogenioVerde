@@ -1,6 +1,8 @@
 -- FASE 3 - Auditoria do projeto.
 -- A origem rastreavel do item no modelo atual e pedido_itens.
 
+drop view if exists vw_auditoria_itens_projeto;
+
 create or replace view vw_auditoria_itens_projeto as
 with cotacao_resumo as (
     select
@@ -74,6 +76,10 @@ select
     nr.notas_fiscais,
     nr.fornecedores_nf,
     coalesce(nr.valor_total_nf_item, 0) as valor_nf_item,
+    greatest(
+        pi.valor_total - coalesce(nullif(nr.valor_total_nf_item, 0), cr.valor_cotado_vencedor, 0),
+        0
+    ) as valor_economia,
     coalesce(nr.tem_arquivo_nf, false) as tem_arquivo_nf,
 
     dr.patrimonio_id,
@@ -102,8 +108,8 @@ select
         when coalesce(cr.total_vencedoras, 0) > 1
             then 'ERRO: item com mais de um vencedor'
 
-        when abs(coalesce(cr.valor_cotado_vencedor, 0) - pi.valor_total) > 0.01
-            then 'ALERTA: valor cotado diverge do solicitado'
+        when coalesce(cr.valor_cotado_vencedor, 0) - pi.valor_total > 0.01
+            then 'ERRO: valor cotado maior que solicitado'
 
         when coalesce(nr.total_itens_nf, 0) = 0
             then 'PENDENTE: item sem nota fiscal'
