@@ -115,7 +115,7 @@ select
             then 'ERRO: fornecedor da NF diverge do vencedor'
 
         when coalesce(nr.tem_arquivo_nf, false) = false
-            then 'PENDENTE: NF sem arquivo/anexo'
+            then 'PENDENTE: NF sem local/link no Drive'
 
         when pi.tipo_item = 'permanente' and dr.patrimonio_id is null
             then 'PENDENTE: permanente sem patrimonio'

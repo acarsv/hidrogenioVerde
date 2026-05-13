@@ -1257,6 +1257,7 @@ elif menu == "compra_nota":
             valor_nf_padrao = float(itens_nf_df["valor_total"].sum()) if len(itens_nf_df) else 0.0
             numero_nf = st.text_input("Número da NF")
             fornecedor_nf = st.text_input("Fornecedor da NF", value=fornecedor_padrao)
+            local_nf = st.text_input("Local/link da NF no Google Drive")
             valor_nf = st.number_input("Valor da NF", min_value=0.0, value=valor_nf_padrao, key=f"nota_valor_nf_{compra_id}_{valor_nf_padrao:.2f}")
             if len(itens_nf_df):
                 st.dataframe(
@@ -1278,6 +1279,8 @@ elif menu == "compra_nota":
                 st.error("Uma NF deve conter itens de um único fornecedor vencedor.")
             elif not numero_nf.strip() or not fornecedor_nf.strip():
                 st.error("Informe número da NF e fornecedor.")
+            elif not local_nf.strip():
+                st.error("Informe o local ou link da NF no Google Drive.")
             elif fornecedor_nf.strip().lower() != str(itens_nf_df["fornecedor"].iloc[0]).strip().lower():
                 st.error("O fornecedor da NF deve ser o mesmo fornecedor vencedor dos itens selecionados.")
             elif Decimal(str(valor_nf)) != Decimal(str(valor_nf_padrao)):
@@ -1296,16 +1299,17 @@ elif menu == "compra_nota":
                     execute("""
                     update notas_fiscais
                     set valor_nf=%s,
+                        arquivo_url=coalesce(nullif(%s, ''), arquivo_url),
                         data_emissao=coalesce(data_emissao, %s),
                         lancado_por=coalesce(lancado_por, %s)
                     where id=%s
-                    """, (valor_nf_atualizado, data_nf, user["id"], nota_id))
+                    """, (valor_nf_atualizado, local_nf.strip(), data_nf, user["id"], nota_id))
                 else:
                     nota_criada = query("""
-                    insert into notas_fiscais (compra_id, solicitacao_id, numero_nf, fornecedor, valor_nf, data_emissao, lancado_por)
-                    values (%s,%s,%s,%s,%s,%s,%s)
+                    insert into notas_fiscais (compra_id, solicitacao_id, numero_nf, fornecedor, valor_nf, data_emissao, arquivo_url, lancado_por)
+                    values (%s,%s,%s,%s,%s,%s,%s,%s)
                     returning id
-                    """, (compra_id, sid, numero_nf, fornecedor_nf, valor_nf, data_nf, user["id"]))
+                    """, (compra_id, sid, numero_nf, fornecedor_nf, valor_nf, data_nf, local_nf.strip(), user["id"]))
                     nota_id = int(nota_criada.iloc[0]["id"])
                 for _, item_nf in itens_nf_df.iterrows():
                     execute("""
