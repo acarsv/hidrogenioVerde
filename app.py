@@ -873,33 +873,68 @@ elif menu == "nova_exigencia":
     rubrica_id = int(rubricas.loc[rubricas["label"] == rubrica_label, "id"].iloc[0])
     saldo_atual = Decimal(str(rubricas.loc[rubricas["label"] == rubrica_label, "saldo_disponivel"].iloc[0]))
     st.caption(f"Disponível operacional: {format_currency_brl_markdown(saldo_atual)}")
-    descricao = st.text_area("Descrição detalhada do item/serviço")
-    quantidade = st.number_input("Quantidade", min_value=0.001, value=1.0)
-    unidade = st.text_input("Unidade", value="un")
-    valor_unitario_estimado = st.number_input("Valor unitário (R$)", min_value=0.0, value=0.0, key="nova_valor_unitario")
-    valor_estimado = quantidade * valor_unitario_estimado
-    st.text_input(
-        "Valor total (R$)",
-        value=format_currency_brl(valor_estimado),
-        disabled=True,
-        key=f"nova_valor_total_{quantidade}_{valor_unitario_estimado}_{valor_estimado:.2f}",
+    descricao = st.text_area("Resumo do pedido/requerimento")
+    st.markdown("### Itens do pedido")
+    itens_base = pd.DataFrame(
+        [{"descricao": "", "tipo_item": "permanente", "quantidade": 1.0, "valor_unitario": 0.0, "observacoes": ""}]
     )
+    itens_editados = st.data_editor(
+        itens_base,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic",
+        column_config={
+            "descricao": st.column_config.TextColumn("Item", required=True),
+            "tipo_item": st.column_config.SelectboxColumn("Tipo", options=["permanente", "consumo", "servico"], required=True),
+            "quantidade": st.column_config.NumberColumn("Quantidade", min_value=0.01, format="%.2f"),
+            "valor_unitario": st.column_config.NumberColumn("Valor unitario", min_value=0.0, format="R$ %.2f"),
+            "observacoes": st.column_config.TextColumn("Observacoes"),
+        },
+        key="nova_exigencia_itens",
+    )
+    itens_validos = itens_editados[itens_editados["descricao"].fillna("").str.strip() != ""].copy()
+    if len(itens_validos):
+        itens_validos["quantidade"] = pd.to_numeric(itens_validos["quantidade"], errors="coerce").fillna(0)
+        itens_validos["valor_unitario"] = pd.to_numeric(itens_validos["valor_unitario"], errors="coerce").fillna(0)
+        itens_validos["valor_total"] = itens_validos["quantidade"] * itens_validos["valor_unitario"]
+    valor_estimado = float(itens_validos["valor_total"].sum()) if len(itens_validos) else 0.0
+    st.metric("Valor total estimado", format_currency_brl(valor_estimado))
     justificativa = st.text_area("Justificativa")
     if st.button("Enviar solicitação"):
         valor_estimado_decimal = Decimal(str(valor_estimado))
         excede_saldo, saldo_disponivel = excede_saldo_disponivel(rubrica_id, valor_estimado_decimal)
-        if excede_saldo:
+        if len(itens_validos) == 0:
+            st.error("Informe pelo menos um item do pedido.")
+        elif (itens_validos["quantidade"] <= 0).any():
+            st.error("Todos os itens devem ter quantidade maior que zero.")
+        elif excede_saldo:
             st.error(
                 "Solicitação não registrada. "
                 f"O valor total ({format_currency_brl_markdown(valor_estimado_decimal)}) "
                 f"supera o disponível operacional da rubrica ({format_currency_brl_markdown(saldo_disponivel)})."
             )
         else:
-            execute("""
+            descricao_pedido = descricao.strip() or "; ".join(itens_validos["descricao"].astype(str).tolist())[:500]
+            solicitacao_criada = query("""
             insert into solicitacoes_compra (rubrica_id, solicitante_id, descricao, quantidade, unidade, valor_estimado, justificativa, status)
             values (%s,%s,%s,%s,%s,%s,%s,'solicitacao')
-            """, (rubrica_id, user["id"], descricao, quantidade, unidade, valor_estimado, justificativa))
-            st.success("Solicitação registrada.")
+            returning id
+            """, (rubrica_id, user["id"], descricao_pedido, float(itens_validos["quantidade"].sum()), "itens", valor_estimado, justificativa))
+            solicitacao_id = int(solicitacao_criada.iloc[0]["id"])
+            for _, item in itens_validos.iterrows():
+                execute("""
+                insert into pedido_itens (pedido_id, rubrica_id, descricao, tipo_item, quantidade, valor_unitario, observacoes)
+                values (%s,%s,%s,%s,%s,%s,%s)
+                """, (
+                    solicitacao_id,
+                    rubrica_id,
+                    str(item["descricao"]).strip(),
+                    item["tipo_item"],
+                    Decimal(str(item["quantidade"])),
+                    Decimal(str(item["valor_unitario"])),
+                    str(item.get("observacoes") or "").strip() or None,
+                ))
+            st.success(f"Solicitação #{solicitacao_id} registrada com {len(itens_validos)} item(ns).")
 
 elif menu == "solicitacoes":
     df = query("""
@@ -963,32 +998,94 @@ elif menu == "cotacoes":
         st.warning("Não há solicitações autorizadas para cotação.")
     else:
         sid = st.selectbox("Solicitação", solicitacoes["id"].tolist(), format_func=lambda x: f"#{x} - {solicitacoes.loc[solicitacoes.id==x,'descricao'].iloc[0][:80]}")
-        solicitacao = solicitacoes.loc[solicitacoes.id == sid].iloc[0]
-        quantidade_solicitada = float(solicitacao["quantidade"])
-        valor_estimado = float(solicitacao["valor_estimado"] or 0)
-        valor_unitario_padrao = valor_estimado / quantidade_solicitada if quantidade_solicitada else 0.0
-        st.number_input("Quantidade solicitada", min_value=0.001, value=quantidade_solicitada, disabled=True, key=f"cotacao_quantidade_solicitada_{sid}_{quantidade_solicitada}")
+        pedido_itens = query("""
+        select id, descricao, tipo_item, quantidade, valor_unitario, valor_total
+        from pedido_itens
+        where pedido_id=%s
+        order by created_at, descricao
+        """, (sid,))
+        if len(pedido_itens) == 0:
+            st.warning("Esta solicitação ainda não tem itens do pedido. Recrie pela tela Nova exigência ou migre os itens antes de cotar.")
+            st.stop()
+
         ordem = st.selectbox("Cotação", [1,2,3], key=f"cotacao_ordem_{sid}")
         fornecedor = st.text_input("Fornecedor", key=f"cotacao_fornecedor_{sid}_{ordem}")
         cnpj = st.text_input("CNPJ/CPF", key=f"cotacao_cnpj_{sid}_{ordem}")
         contato = st.text_input("Telefone/E-mail", key=f"cotacao_contato_{sid}_{ordem}")
-        valor_unit = st.number_input("Valor unitário", min_value=0.0, value=valor_unitario_padrao, key=f"cotacao_valor_unitario_{sid}_{ordem}")
-        valor_total = quantidade_solicitada * valor_unit
-        st.text_input("Valor total", value=format_currency_brl(valor_total), disabled=True, key=f"cotacao_valor_total_{sid}_{ordem}_{valor_total:.2f}")
         prazo = st.text_input("Prazo de entrega", key=f"cotacao_prazo_{sid}_{ordem}")
         pagamento = st.text_input("Forma de pagamento", key=f"cotacao_pagamento_{sid}_{ordem}")
+
+        cotacao_existente = query("select id from cotacoes where solicitacao_id=%s and ordem=%s", (sid, ordem))
+        valores_existentes = pd.DataFrame()
+        if len(cotacao_existente):
+            valores_existentes = query("""
+            select pedido_item_id, quantidade, valor_unitario, observacoes
+            from cotacao_itens
+            where cotacao_id=%s and pedido_item_id is not null
+            """, (int(cotacao_existente.iloc[0]["id"]),))
+
+        linhas_cotacao = []
+        for _, item in pedido_itens.iterrows():
+            existente = valores_existentes[valores_existentes["pedido_item_id"] == item["id"]] if len(valores_existentes) else pd.DataFrame()
+            linhas_cotacao.append({
+                "pedido_item_id": item["id"],
+                "Item": item["descricao"],
+                "Tipo": item["tipo_item"],
+                "Quantidade": float(existente.iloc[0]["quantidade"] if len(existente) else item["quantidade"]),
+                "Valor unitario": float(existente.iloc[0]["valor_unitario"] if len(existente) else item["valor_unitario"]),
+                "Observacoes": existente.iloc[0]["observacoes"] if len(existente) else "",
+            })
+
+        cotacao_itens_editados = st.data_editor(
+            pd.DataFrame(linhas_cotacao),
+            use_container_width=True,
+            hide_index=True,
+            disabled=["pedido_item_id", "Item", "Tipo"],
+            column_config={
+                "pedido_item_id": None,
+                "Quantidade": st.column_config.NumberColumn("Quantidade", min_value=0.01, format="%.2f"),
+                "Valor unitario": st.column_config.NumberColumn("Valor unitario", min_value=0.0, format="R$ %.2f"),
+                "Observacoes": st.column_config.TextColumn("Observacoes"),
+            },
+            key=f"cotacao_itens_{sid}_{ordem}",
+        )
+        cotacao_itens_editados["Quantidade"] = pd.to_numeric(cotacao_itens_editados["Quantidade"], errors="coerce").fillna(0)
+        cotacao_itens_editados["Valor unitario"] = pd.to_numeric(cotacao_itens_editados["Valor unitario"], errors="coerce").fillna(0)
+        cotacao_itens_editados["Valor total"] = cotacao_itens_editados["Quantidade"] * cotacao_itens_editados["Valor unitario"]
+        valor_total = float(cotacao_itens_editados["Valor total"].sum())
+        st.metric("Total da cotação", format_currency_brl(valor_total))
+
         if st.button("Salvar cotação"):
-            execute("""
+            if not fornecedor.strip():
+                st.error("Informe o fornecedor.")
+            elif (cotacao_itens_editados["Quantidade"] <= 0).any():
+                st.error("Todos os itens cotados devem ter quantidade maior que zero.")
+            else:
+                cotacao_salva = query("""
             insert into cotacoes (solicitacao_id,ordem,fornecedor,cnpj_cpf,telefone_email,valor_unitario,valor_total,prazo_entrega,forma_pagamento)
             values (%s,%s,%s,%s,%s,%s,%s,%s,%s)
             on conflict (solicitacao_id,ordem) do update set fornecedor=excluded.fornecedor, cnpj_cpf=excluded.cnpj_cpf,
             telefone_email=excluded.telefone_email, valor_unitario=excluded.valor_unitario, valor_total=excluded.valor_total,
             prazo_entrega=excluded.prazo_entrega, forma_pagamento=excluded.forma_pagamento
-            """, (sid, ordem, fornecedor, cnpj, contato, valor_unit, valor_total, prazo, pagamento))
-            execute("update solicitacoes_compra set status='cotado' where id=%s", (sid,))
-            st.success("Cotação salva.")
+            returning id
+            """, (sid, ordem, fornecedor, cnpj, contato, 0, valor_total, prazo, pagamento))
+                cotacao_id = int(cotacao_salva.iloc[0]["id"])
+                execute("delete from cotacao_itens where cotacao_id=%s", (cotacao_id,))
+                for _, item in cotacao_itens_editados.iterrows():
+                    execute("""
+                    insert into cotacao_itens (cotacao_id, pedido_item_id, quantidade, valor_unitario, observacoes)
+                    values (%s,%s,%s,%s,%s)
+                    """, (
+                        cotacao_id,
+                        item["pedido_item_id"],
+                        Decimal(str(item["Quantidade"])),
+                        Decimal(str(item["Valor unitario"])),
+                        str(item.get("Observacoes") or "").strip() or None,
+                    ))
+                execute("update solicitacoes_compra set status='cotado' where id=%s", (sid,))
+                st.success("Cotação por item salva.")
         st.dataframe(
-            query('select ordem, fornecedor, valor_total as "Valor total", prazo_entrega, forma_pagamento, vencedora from cotacoes where solicitacao_id=%s order by ordem', (sid,)),
+            query('select ordem, fornecedor, valor_total as "Valor total", prazo_entrega, forma_pagamento from cotacoes where solicitacao_id=%s order by ordem', (sid,)),
             use_container_width=True,
             column_config={
                 "Valor total": st.column_config.NumberColumn("Valor total", format="R$ %.2f"),
@@ -1010,51 +1107,91 @@ elif menu == "compra_nota":
         cancelar_solicitacao(sid, user["id"])
         st.success("Compra cancelada e solicitação removida dos registros ativos.")
         st.rerun()
-    cotacoes_df = query('select id, ordem, fornecedor, valor_total as "Valor total", vencedora from cotacoes where solicitacao_id=%s order by ordem', (sid,))
-    if len(cotacoes_df) == 0:
-        st.warning("Não há cotações cadastradas para essa solicitação.")
-        cotacao_id = None
-    else:
-        cotacoes_editadas = st.data_editor(
-            cotacoes_df,
-            use_container_width=True,
-            hide_index=True,
-            disabled=["id", "ordem", "fornecedor", "Valor total"],
-            column_config={
-                "Valor total": st.column_config.NumberColumn("Valor total", format="R$ %.2f"),
-                "vencedora": st.column_config.CheckboxColumn("Vencedora"),
-            },
-            key=f"cotacoes_vencedora_{sid}",
-        )
-        vencedoras = cotacoes_editadas[cotacoes_editadas["vencedora"] == True]
-        if len(vencedoras) == 1:
-            cotacao_id = int(vencedoras.iloc[0]["id"])
-        else:
-            cotacao_id = None
-            if len(vencedoras) > 1:
-                st.error("Marque apenas uma cotação vencedora.")
+    cotacoes_itens_df = query("""
+    select
+      ci.id,
+      ci.pedido_item_id,
+      ci.cotacao_id,
+      c.ordem,
+      c.fornecedor,
+      pi.descricao as item,
+      pi.tipo_item,
+      ci.quantidade,
+      ci.valor_unitario,
+      ci.valor_total as "Valor total",
+      ci.vencedor
+    from cotacao_itens ci
+    join cotacoes c on c.id = ci.cotacao_id
+    join pedido_itens pi on pi.id = ci.pedido_item_id
+    where c.solicitacao_id=%s
+    order by pi.descricao, c.ordem
+    """, (sid,))
+    if len(cotacoes_itens_df) == 0:
+        st.warning("Não há itens cotados para essa solicitação.")
+        st.stop()
+
+    st.markdown("### Escolher vencedor por item")
+    cotacoes_editadas = st.data_editor(
+        cotacoes_itens_df,
+        use_container_width=True,
+        hide_index=True,
+        disabled=["id", "pedido_item_id", "cotacao_id", "ordem", "fornecedor", "item", "tipo_item", "quantidade", "valor_unitario", "Valor total"],
+        column_config={
+            "id": None,
+            "pedido_item_id": None,
+            "cotacao_id": None,
+            "valor_unitario": st.column_config.NumberColumn("Valor unitario", format="R$ %.2f"),
+            "Valor total": st.column_config.NumberColumn("Valor total", format="R$ %.2f"),
+            "vencedor": st.column_config.CheckboxColumn("Vencedor"),
+        },
+        key=f"cotacoes_itens_vencedores_{sid}",
+    )
+
+    vencedoras_por_item = cotacoes_editadas[cotacoes_editadas["vencedor"] == True]
+    itens_com_multiplos_vencedores = vencedoras_por_item.groupby("pedido_item_id").size()
+    itens_sem_vencedor = set(cotacoes_editadas["pedido_item_id"]) - set(vencedoras_por_item["pedido_item_id"])
+    if len(itens_com_multiplos_vencedores[itens_com_multiplos_vencedores > 1]):
+        st.error("Cada item deve ter apenas uma cotação vencedora.")
+    if itens_sem_vencedor:
+        st.warning("Ainda existem itens sem cotação vencedora.")
 
     if st.button("Registrar compra"):
-        if cotacao_id is None:
-            st.error("Marque uma cotação vencedora na tabela.")
+        if len(vencedoras_por_item) == 0:
+            st.error("Marque pelo menos um item vencedor.")
+        elif len(itens_sem_vencedor):
+            st.error("Marque uma cotação vencedora para todos os itens.")
+        elif len(itens_com_multiplos_vencedores[itens_com_multiplos_vencedores > 1]):
+            st.error("Corrija os itens com mais de um vencedor.")
         else:
-            df = query("select s.rubrica_id, c.valor_total from solicitacoes_compra s join cotacoes c on c.solicitacao_id=s.id where s.id=%s and c.id=%s", (sid, cotacao_id))
-            if len(df) != 1:
-                st.error("Cotação não encontrada para essa solicitação.")
-            else:
-                valor = Decimal(str(df.iloc[0]["valor_total"]))
-                execute("update cotacoes set vencedora=false where solicitacao_id=%s", (sid,))
-                execute("update cotacoes set vencedora=true where id=%s", (cotacao_id,))
-                execute("insert into compras (solicitacao_id,cotacao_vencedora_id,valor_compra,comprador_id) values (%s,%s,%s,%s) on conflict (solicitacao_id) do update set cotacao_vencedora_id=excluded.cotacao_vencedora_id, valor_compra=excluded.valor_compra, comprador_id=excluded.comprador_id", (sid, cotacao_id, valor, user["id"]))
-                execute("update solicitacoes_compra set status='aguardando_nota' where id=%s", (sid,))
-                sincronizar_orcamento()
-                st.success("Compra registrada. Orçamento atualizado e status: aguardando nota.")
+            execute("""
+            update cotacao_itens ci
+            set vencedor=false
+            from cotacoes c
+            where c.id = ci.cotacao_id and c.solicitacao_id=%s
+            """, (sid,))
+            execute("update cotacoes set vencedora=false where solicitacao_id=%s", (sid,))
+            for _, vencedora in vencedoras_por_item.iterrows():
+                execute("update cotacao_itens set vencedor=true where id=%s", (vencedora["id"],))
+            for cotacao_id in vencedoras_por_item["cotacao_id"].unique():
+                execute("update cotacoes set vencedora=true where id=%s", (int(cotacao_id),))
+            valor = Decimal(str(vencedoras_por_item["Valor total"].sum()))
+            primeira_cotacao_id = int(vencedoras_por_item.iloc[0]["cotacao_id"])
+            execute("""
+            insert into compras (solicitacao_id,cotacao_vencedora_id,valor_compra,comprador_id)
+            values (%s,%s,%s,%s)
+            on conflict (solicitacao_id) do update set
+              cotacao_vencedora_id=excluded.cotacao_vencedora_id,
+              valor_compra=excluded.valor_compra,
+              comprador_id=excluded.comprador_id
+            """, (sid, primeira_cotacao_id, valor, user["id"]))
+            execute("update solicitacoes_compra set status='aguardando_nota' where id=%s", (sid,))
+            sincronizar_orcamento()
+            st.success("Compra registrada por item. Orçamento atualizado e status: aguardando nota.")
 
     st.markdown("### Lançar nota fiscal")
     compra_df = query("""
-    select c.id, c.valor_compra, co.fornecedor
+    select c.id, c.valor_compra
     from compras c
-    left join cotacoes co on co.id = c.cotacao_vencedora_id
     where c.solicitacao_id=%s
     """, (sid,))
     if len(compra_df) == 0:
@@ -1062,17 +1199,100 @@ elif menu == "compra_nota":
     else:
         compra_id = int(compra_df.iloc[0]["id"])
         valor_compra = float(compra_df.iloc[0]["valor_compra"])
-        fornecedor_padrao = compra_df.iloc[0]["fornecedor"] or ""
         st.number_input("ID da compra", min_value=1, value=compra_id, disabled=True, key=f"nota_compra_id_{sid}_{compra_id}")
-        numero_nf = st.text_input("Número da NF")
-        fornecedor_nf = st.text_input("Fornecedor da NF", value=fornecedor_padrao)
-        valor_nf = st.number_input("Valor da NF", min_value=0.0, value=valor_compra, key=f"nota_valor_nf_{compra_id}_{valor_compra:.2f}")
+        itens_vencedores = query("""
+        select
+          ci.pedido_item_id,
+          pi.descricao,
+          pi.tipo_item,
+          ci.quantidade,
+          ci.valor_unitario,
+          ci.valor_total,
+          c.fornecedor
+        from cotacao_itens ci
+        join cotacoes c on c.id = ci.cotacao_id
+        join pedido_itens pi on pi.id = ci.pedido_item_id
+        where c.solicitacao_id=%s and ci.vencedor=true
+        order by c.fornecedor, pi.descricao
+        """, (sid,))
+        itens_lancados = query("""
+        select pedido_item_id
+        from nota_fiscal_itens nfi
+        join notas_fiscais nf on nf.id = nfi.nota_fiscal_id
+        where nf.compra_id=%s and nfi.pedido_item_id is not null
+        """, (compra_id,))
+        ids_lancados = set(itens_lancados["pedido_item_id"].tolist()) if len(itens_lancados) else set()
+        itens_pendentes = itens_vencedores[~itens_vencedores["pedido_item_id"].isin(ids_lancados)].copy()
+
+        if len(itens_pendentes) == 0:
+            st.success("Todos os itens vencedores ja foram vinculados a notas fiscais.")
+        else:
+            opcoes_itens_nf = itens_pendentes["pedido_item_id"].tolist()
+            itens_nf = st.multiselect(
+                "Itens desta NF",
+                opcoes_itens_nf,
+                format_func=lambda item_id: (
+                    f"{itens_pendentes.loc[itens_pendentes.pedido_item_id == item_id, 'descricao'].iloc[0]} - "
+                    f"{itens_pendentes.loc[itens_pendentes.pedido_item_id == item_id, 'fornecedor'].iloc[0]}"
+                ),
+                key=f"nota_itens_{compra_id}",
+            )
+            itens_nf_df = itens_pendentes[itens_pendentes["pedido_item_id"].isin(itens_nf)].copy()
+            fornecedor_padrao = ""
+            if len(itens_nf_df) and itens_nf_df["fornecedor"].nunique() == 1:
+                fornecedor_padrao = itens_nf_df["fornecedor"].iloc[0]
+            valor_nf_padrao = float(itens_nf_df["valor_total"].sum()) if len(itens_nf_df) else 0.0
+            numero_nf = st.text_input("Número da NF")
+            fornecedor_nf = st.text_input("Fornecedor da NF", value=fornecedor_padrao)
+            valor_nf = st.number_input("Valor da NF", min_value=0.0, value=valor_nf_padrao, key=f"nota_valor_nf_{compra_id}_{valor_nf_padrao:.2f}")
+            if len(itens_nf_df):
+                st.dataframe(
+                    itens_nf_df[["descricao", "fornecedor", "quantidade", "valor_unitario", "valor_total"]],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "valor_unitario": st.column_config.NumberColumn("Valor unitario", format="R$ %.2f"),
+                        "valor_total": st.column_config.NumberColumn("Valor total", format="R$ %.2f"),
+                    },
+                )
         data_nf = st.date_input("Data de emissão", value=date.today())
         if st.button("Consolidar nota e finalizar"):
-            execute("insert into notas_fiscais (compra_id,numero_nf,fornecedor,valor_nf,data_emissao,lancado_por) values (%s,%s,%s,%s,%s,%s)", (compra_id, numero_nf, fornecedor_nf, valor_nf, data_nf, user["id"]))
-            execute("update solicitacoes_compra set status='finalizado' where id=%s", (sid,))
-            sincronizar_orcamento()
-            st.success("Nota fiscal lançada. Compra finalizada.")
+            if len(itens_pendentes) == 0:
+                st.info("Não há itens pendentes para lançar.")
+            elif len(itens_nf_df) == 0:
+                st.error("Selecione pelo menos um item para a nota fiscal.")
+            elif not numero_nf.strip() or not fornecedor_nf.strip():
+                st.error("Informe número da NF e fornecedor.")
+            elif Decimal(str(valor_nf)) != Decimal(str(valor_nf_padrao)):
+                st.error("O valor da NF deve bater com a soma dos itens selecionados.")
+            else:
+                nota_criada = query("""
+                insert into notas_fiscais (compra_id, solicitacao_id, numero_nf, fornecedor, valor_nf, data_emissao, lancado_por)
+                values (%s,%s,%s,%s,%s,%s,%s)
+                returning id
+                """, (compra_id, sid, numero_nf, fornecedor_nf, valor_nf, data_nf, user["id"]))
+                nota_id = int(nota_criada.iloc[0]["id"])
+                for _, item_nf in itens_nf_df.iterrows():
+                    execute("""
+                    insert into nota_fiscal_itens
+                      (nota_fiscal_id, pedido_item_id, descricao, tipo_item, quantidade, valor_unitario)
+                    values (%s,%s,%s,%s,%s,%s)
+                    """, (
+                        nota_id,
+                        item_nf["pedido_item_id"],
+                        item_nf["descricao"],
+                        item_nf["tipo_item"],
+                        Decimal(str(item_nf["quantidade"])),
+                        Decimal(str(item_nf["valor_unitario"])),
+                    ))
+                total_itens = len(itens_vencedores)
+                total_lancado = len(ids_lancados) + len(itens_nf_df)
+                if total_lancado >= total_itens:
+                    execute("update solicitacoes_compra set status='finalizado' where id=%s", (sid,))
+                    st.success("Nota fiscal lançada. Todos os itens foram conferidos e a compra foi finalizada.")
+                else:
+                    st.success("Nota fiscal lançada. Ainda há itens pendentes de NF.")
+                sincronizar_orcamento()
 
 elif menu == "itens_comprados":
     df = query("""
@@ -1080,22 +1300,22 @@ elif menu == "itens_comprados":
       s.id as "Solicitação",
       r.codigo as "Rubrica",
       r.nome as "Nome da rubrica",
-      s.descricao as "Produto/serviço",
-      s.quantidade as "Quantidade",
-      c.valor_compra as "Valor da compra",
-      co.fornecedor as "Fornecedor da cotação",
+      nfi.descricao as "Produto/serviço",
+      nfi.quantidade as "Quantidade",
+      nfi.valor_total as "Valor da compra",
+      nf.fornecedor as "Fornecedor da cotação",
       nf.numero_nf as "Número da NF",
       nf.fornecedor as "Fornecedor da NF",
-      nf.valor_nf as "Valor da NF",
+      nfi.valor_total as "Valor da NF",
       nf.data_emissao as "Data de emissão",
       nf.lancado_em as "Lançado em"
-    from solicitacoes_compra s
-    join rubricas r on r.id = s.rubrica_id
-    join compras c on c.solicitacao_id = s.id
-    left join cotacoes co on co.id = c.cotacao_vencedora_id
-    left join notas_fiscais nf on nf.compra_id = c.id
+    from nota_fiscal_itens nfi
+    join notas_fiscais nf on nf.id = nfi.nota_fiscal_id
+    join pedido_itens pi on pi.id = nfi.pedido_item_id
+    join solicitacoes_compra s on s.id = pi.pedido_id
+    join rubricas r on r.id = pi.rubrica_id
     where s.status = 'finalizado'
-    order by nf.lancado_em desc nulls last, c.comprado_em desc
+    order by nf.lancado_em desc nulls last, nf.numero_nf, nfi.descricao
     """)
     if len(df) == 0:
         st.info("Ainda não há itens comprados finalizados.")
