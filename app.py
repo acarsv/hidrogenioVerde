@@ -304,8 +304,13 @@ def construir_planilha_itens_comprados(df: pd.DataFrame) -> bytes:
 
 COLUNAS_AUDITORIA = {
     "pedido_item_id": "Item do pedido (ID)",
+    "rubrica_id": "Rubrica (ID)",
     "rubrica_codigo": "Rubrica",
     "rubrica_nome": "Nome da rubrica",
+    "rubrica_saldo_inicial": "Saldo inicial",
+    "rubrica_valor_reservado": "Valor reservado",
+    "rubrica_valor_utilizado": "Valor utilizado",
+    "rubrica_saldo_restante": "Saldo restante",
     "solicitacao_id": "Solicitação",
     "descricao": "Descrição",
     "tipo_item": "Tipo do item",
