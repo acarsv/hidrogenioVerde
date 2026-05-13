@@ -873,7 +873,13 @@ elif menu == "nova_exigencia":
     rubrica_id = int(rubricas.loc[rubricas["label"] == rubrica_label, "id"].iloc[0])
     saldo_atual = Decimal(str(rubricas.loc[rubricas["label"] == rubrica_label, "saldo_disponivel"].iloc[0]))
     st.caption(f"Disponível operacional: {format_currency_brl_markdown(saldo_atual)}")
-    descricao = st.text_area("Resumo do pedido/requerimento")
+    if "nova_exigencia_form_version" not in st.session_state:
+        st.session_state.nova_exigencia_form_version = 0
+    if "nova_exigencia_sucesso" in st.session_state:
+        st.success(st.session_state.pop("nova_exigencia_sucesso"))
+
+    form_version = st.session_state.nova_exigencia_form_version
+    descricao = st.text_area("Resumo do pedido/requerimento", key=f"nova_descricao_{form_version}")
     st.markdown("### Itens do pedido")
     itens_base = pd.DataFrame(
         [{"descricao": "", "tipo_item": "permanente", "quantidade": 1.0, "valor_unitario": 0.0, "observacoes": ""}]
@@ -890,7 +896,7 @@ elif menu == "nova_exigencia":
             "valor_unitario": st.column_config.NumberColumn("Valor unitario", min_value=0.0, format="R$ %.2f"),
             "observacoes": st.column_config.TextColumn("Observacoes"),
         },
-        key="nova_exigencia_itens",
+        key=f"nova_exigencia_itens_{form_version}",
     )
     itens_validos = itens_editados[itens_editados["descricao"].fillna("").str.strip() != ""].copy()
     if len(itens_validos):
@@ -899,8 +905,8 @@ elif menu == "nova_exigencia":
         itens_validos["valor_total"] = itens_validos["quantidade"] * itens_validos["valor_unitario"]
     valor_estimado = float(itens_validos["valor_total"].sum()) if len(itens_validos) else 0.0
     st.metric("Valor total estimado", format_currency_brl(valor_estimado))
-    justificativa = st.text_area("Justificativa")
-    if st.button("Enviar solicitação"):
+    justificativa = st.text_area("Justificativa", key=f"nova_justificativa_{form_version}")
+    if st.button("Enviar solicitação", key=f"nova_enviar_{form_version}"):
         valor_estimado_decimal = Decimal(str(valor_estimado))
         excede_saldo, saldo_disponivel = excede_saldo_disponivel(rubrica_id, valor_estimado_decimal)
         if len(itens_validos) == 0:
@@ -934,7 +940,9 @@ elif menu == "nova_exigencia":
                     Decimal(str(item["valor_unitario"])),
                     str(item.get("observacoes") or "").strip() or None,
                 ))
-            st.success(f"Solicitação #{solicitacao_id} registrada com {len(itens_validos)} item(ns).")
+            st.session_state.nova_exigencia_sucesso = f"Solicitação #{solicitacao_id} registrada com {len(itens_validos)} item(ns)."
+            st.session_state.nova_exigencia_form_version += 1
+            st.rerun()
 
 elif menu == "solicitacoes":
     df = query("""
