@@ -727,6 +727,94 @@ def voltar_item_para_cotacao(pedido_item_id, usuario_id):
 
     sincronizar_orcamento()
 
+def ajustar_valor_solicitado_para_nf(pedido_item_id, usuario_id):
+    conn = get_conn()
+    conn.autocommit = False
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+            select
+                pi.id,
+                pi.pedido_id,
+                pi.descricao,
+                pi.quantidade,
+                pi.valor_total as valor_solicitado,
+                s.status as status_solicitacao,
+                (
+                    select coalesce(sum(ci.valor_total), 0)
+                    from cotacao_itens ci
+                    where ci.pedido_item_id = pi.id and ci.vencedor = true
+                ) as valor_cotado_vencedor,
+                coalesce(sum(nfi.valor_total), 0) as valor_nf_item
+            from pedido_itens pi
+            join solicitacoes_compra s on s.id = pi.pedido_id
+            left join nota_fiscal_itens nfi on nfi.pedido_item_id = pi.id
+            where pi.id=%s
+            group by pi.id, pi.pedido_id, pi.descricao, pi.quantidade, pi.valor_total, s.status
+            """, (pedido_item_id,))
+            item = cur.fetchone()
+            if not item:
+                raise ValueError("Item do pedido nao encontrado.")
+
+            quantidade = Decimal(str(item["quantidade"] or 0))
+            valor_nf_item = Decimal(str(item["valor_nf_item"] or 0))
+            valor_cotado_vencedor = Decimal(str(item["valor_cotado_vencedor"] or 0))
+            valor_solicitado = Decimal(str(item["valor_solicitado"] or 0))
+            if quantidade <= 0:
+                raise ValueError("Quantidade do item deve ser maior que zero.")
+            if valor_nf_item <= 0:
+                raise ValueError("Nao existe valor de NF para ajustar este item.")
+            if abs(valor_nf_item - valor_cotado_vencedor) > Decimal("0.01"):
+                raise ValueError("A NF nao confere com a cotacao vencedora. Volte o item para cotacao.")
+
+            novo_valor_unitario = (valor_nf_item / quantidade).quantize(Decimal("0.01"))
+            solicitacao_id = int(item["pedido_id"])
+            descricao_item = item["descricao"]
+
+            cur.execute("""
+            update pedido_itens
+            set valor_unitario=%s
+            where id=%s
+            """, (novo_valor_unitario, pedido_item_id))
+
+            cur.execute("""
+            update solicitacoes_compra s
+            set valor_estimado = totais.valor_total,
+                quantidade = totais.quantidade_total,
+                atualizado_em = now()
+            from (
+                select
+                    pedido_id,
+                    coalesce(sum(valor_total), 0) as valor_total,
+                    coalesce(sum(quantidade), 0) as quantidade_total
+                from pedido_itens
+                where pedido_id=%s
+                group by pedido_id
+            ) totais
+            where s.id = totais.pedido_id
+            """, (solicitacao_id,))
+
+            cur.execute("""
+            insert into historico_status (solicitacao_id,status_novo,usuario_id,observacao)
+            values (%s,%s,%s,%s)
+            """, (
+                solicitacao_id,
+                item["status_solicitacao"],
+                usuario_id,
+                (
+                    f"Valor solicitado do item ajustado para o valor da NF: {descricao_item}. "
+                    f"De R$ {valor_solicitado:.2f} para R$ {valor_nf_item:.2f}."
+                ),
+            ))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    sincronizar_orcamento()
+
 def sincronizar_orcamento():
     execute("update rubricas set valor_reservado = 0, valor_utilizado = 0")
     execute("""
@@ -1849,6 +1937,45 @@ elif menu == "auditoria":
                             else:
                                 voltar_item_para_cotacao(item_corrigir_id, user["id"])
                                 st.success("Item voltou para cotação. Revise a cotação vencedora e lance a NF novamente.")
+                                st.rerun()
+                    problemas_ajuste_valor = problemas[
+                        (problemas["valor_nf_item"].fillna(0) > 0)
+                        & (
+                            (
+                                problemas["valor_nf_item"].fillna(0)
+                                - problemas["valor_cotado_vencedor"].fillna(0)
+                            ).abs() <= 0.01
+                        )
+                        & (
+                            (
+                                problemas["valor_nf_item"].fillna(0)
+                                - problemas["valor_solicitado"].fillna(0)
+                            ).abs() > 0.01
+                        )
+                    ].copy()
+                    if not problemas_ajuste_valor.empty:
+                        st.markdown("#### Ajustar valor solicitado")
+                        item_ajustar_id = st.selectbox(
+                            "Item em que a NF está correta",
+                            problemas_ajuste_valor["pedido_item_id"].tolist(),
+                            format_func=lambda item_id: (
+                                f"Solicitação {problemas_ajuste_valor.loc[problemas_ajuste_valor.pedido_item_id == item_id, 'solicitacao_id'].iloc[0]} - "
+                                f"{problemas_ajuste_valor.loc[problemas_ajuste_valor.pedido_item_id == item_id, 'descricao'].iloc[0]} - "
+                                f"Solicitado {format_currency_brl(problemas_ajuste_valor.loc[problemas_ajuste_valor.pedido_item_id == item_id, 'valor_solicitado'].iloc[0])} / "
+                                f"NF {format_currency_brl(problemas_ajuste_valor.loc[problemas_ajuste_valor.pedido_item_id == item_id, 'valor_nf_item'].iloc[0])}"
+                            ),
+                            key="auditoria_item_ajustar_valor",
+                        )
+                        confirmar_ajuste_valor = st.checkbox(
+                            "Confirmo que o valor da NF está correto e deve substituir o valor solicitado.",
+                            key="confirmar_ajustar_valor_solicitado",
+                        )
+                        if st.button("Ajustar valor solicitado para valor da NF", type="secondary"):
+                            if not confirmar_ajuste_valor:
+                                st.error("Marque a confirmação antes de ajustar o valor solicitado.")
+                            else:
+                                ajustar_valor_solicitado_para_nf(item_ajustar_id, user["id"])
+                                st.success("Valor solicitado ajustado para o valor da NF. A auditoria foi recalculada.")
                                 st.rerun()
 
             st.markdown("### Dados completos da auditoria")
