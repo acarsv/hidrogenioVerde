@@ -180,7 +180,7 @@ def ensure_permissions_schema():
 
     execute("""
     update usuarios_app
-    set permissoes = array['orcamento','nova_exigencia','solicitacoes','cotacoes','compra_nota','destino_final','itens_comprados','membros']
+    set permissoes = array['orcamento','nova_exigencia','solicitacoes','cotacoes','compra_nota','destino_final','auditoria','itens_comprados','membros']
     where papel = 'admin' and (permissoes is null or cardinality(permissoes) = 0)
     """)
 
@@ -624,6 +624,7 @@ BASE_MENU_OPTIONS = [
     ("cotacoes", "Cotações"),
     ("compra_nota", "Compra e nota fiscal"),
     ("destino_final", "Destino final"),
+    ("auditoria", "Auditoria"),
     ("itens_comprados", "Itens comprados"),
 ]
 ADMIN_MENU_OPTIONS = BASE_MENU_OPTIONS + [("membros", "Membros")]
@@ -1433,6 +1434,149 @@ elif menu == "destino_final":
                         ))
                         st.success("Atesto de serviço registrado.")
                         st.rerun()
+
+elif menu == "auditoria":
+    st.caption("Raio X da prestação de contas: pedido, autorização, cotação, nota fiscal, destino final e saldo da rubrica.")
+    if st.button("Executar auditoria do projeto", type="primary"):
+        sincronizar_orcamento()
+        auditoria = query("select * from vw_auditoria_itens_projeto order by rubrica_codigo, solicitacao_id, descricao")
+        conferencia_nf = query("select * from vw_conferencia_notas_fiscais order by numero_nf")
+
+        if len(auditoria) == 0:
+            st.warning("Nenhum dado encontrado para auditoria.")
+        else:
+            total = len(auditoria)
+            ok = len(auditoria[auditoria["status_auditoria"] == "OK"])
+            pendencias = total - ok
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Itens auditados", total)
+            c2.metric("Itens OK", ok)
+            c3.metric("Pendências", pendencias)
+
+            with st.expander("1. Rubrica", expanded=True):
+                rubrica_resumo = (
+                    auditoria
+                    .groupby(["rubrica_codigo", "rubrica_nome"], dropna=False)
+                    .agg(
+                        saldo_inicial=("rubrica_saldo_inicial", "first"),
+                        valor_solicitado=("valor_solicitado", "sum"),
+                        valor_autorizado=("valor_autorizado", "sum"),
+                        valor_empenhado_comprado=("valor_cotado_vencedor", "sum"),
+                        valor_reservado=("rubrica_valor_reservado", "first"),
+                        valor_utilizado=("rubrica_valor_utilizado", "first"),
+                        saldo_restante=("rubrica_saldo_restante", "first"),
+                    )
+                    .reset_index()
+                )
+                st.dataframe(
+                    rubrica_resumo,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "saldo_inicial": st.column_config.NumberColumn("Saldo inicial", format="R$ %.2f"),
+                        "valor_solicitado": st.column_config.NumberColumn("Valor solicitado", format="R$ %.2f"),
+                        "valor_autorizado": st.column_config.NumberColumn("Valor autorizado", format="R$ %.2f"),
+                        "valor_empenhado_comprado": st.column_config.NumberColumn("Valor empenhado/comprado", format="R$ %.2f"),
+                        "valor_reservado": st.column_config.NumberColumn("Valor reservado", format="R$ %.2f"),
+                        "valor_utilizado": st.column_config.NumberColumn("Valor utilizado", format="R$ %.2f"),
+                        "saldo_restante": st.column_config.NumberColumn("Saldo restante", format="R$ %.2f"),
+                    },
+                )
+
+            with st.expander("2. Solicitações", expanded=True):
+                solicitacoes_auditoria = auditoria[[
+                    "solicitacao_id",
+                    "descricao",
+                    "tipo_item",
+                    "quantidade",
+                    "valor_solicitado",
+                    "status_solicitacao",
+                    "autorizado",
+                ]].copy()
+                solicitacoes_auditoria["existe_solicitacao"] = solicitacoes_auditoria["solicitacao_id"].notna()
+                solicitacoes_auditoria["tem_valor"] = solicitacoes_auditoria["valor_solicitado"].fillna(0) > 0
+                solicitacoes_auditoria["tipo_valido"] = solicitacoes_auditoria["tipo_item"].isin(["permanente", "consumo", "servico"])
+                st.dataframe(solicitacoes_auditoria, use_container_width=True, hide_index=True)
+
+            with st.expander("3. Cotações", expanded=True):
+                cotacoes_auditoria = auditoria[[
+                    "solicitacao_id",
+                    "descricao",
+                    "total_cotacoes",
+                    "total_vencedoras",
+                    "fornecedor_vencedor",
+                    "valor_solicitado",
+                    "valor_cotado_vencedor",
+                ]].copy()
+                cotacoes_auditoria["tem_cotacao"] = cotacoes_auditoria["total_cotacoes"] > 0
+                cotacoes_auditoria["tem_vencedor"] = cotacoes_auditoria["total_vencedoras"] == 1
+                cotacoes_auditoria["valor_bate"] = (
+                    cotacoes_auditoria["valor_cotado_vencedor"].fillna(0)
+                    - cotacoes_auditoria["valor_solicitado"].fillna(0)
+                ).abs() <= 0.01
+                st.dataframe(cotacoes_auditoria, use_container_width=True, hide_index=True)
+
+            with st.expander("4. Notas fiscais", expanded=True):
+                notas_auditoria = auditoria[[
+                    "descricao",
+                    "notas_fiscais",
+                    "fornecedor_vencedor",
+                    "fornecedores_nf",
+                    "valor_cotado_vencedor",
+                    "valor_nf_item",
+                    "total_itens_nf",
+                    "tem_arquivo_nf",
+                ]].copy()
+                notas_auditoria["tem_item_nf"] = notas_auditoria["total_itens_nf"] > 0
+                notas_auditoria["valor_nf_bate"] = (
+                    notas_auditoria["valor_nf_item"].fillna(0)
+                    - notas_auditoria["valor_cotado_vencedor"].fillna(0)
+                ).abs() <= 0.01
+                notas_auditoria["fornecedor_bate"] = notas_auditoria["fornecedores_nf"] == notas_auditoria["fornecedor_vencedor"]
+                st.dataframe(notas_auditoria, use_container_width=True, hide_index=True)
+                st.markdown("#### Conferência NF x itens")
+                st.dataframe(conferencia_nf, use_container_width=True, hide_index=True)
+
+            with st.expander("5. Destino final", expanded=True):
+                destino_auditoria = auditoria[[
+                    "descricao",
+                    "tipo_item",
+                    "patrimonio_id",
+                    "estoque_id",
+                    "atesto_id",
+                    "status_auditoria",
+                ]].copy()
+                destino_auditoria["destino_correto"] = (
+                    ((destino_auditoria["tipo_item"] == "permanente") & destino_auditoria["patrimonio_id"].notna())
+                    | ((destino_auditoria["tipo_item"] == "consumo") & destino_auditoria["estoque_id"].notna())
+                    | ((destino_auditoria["tipo_item"] == "servico") & destino_auditoria["atesto_id"].notna())
+                )
+                st.dataframe(destino_auditoria, use_container_width=True, hide_index=True)
+
+            with st.expander("6. Inconsistências", expanded=True):
+                problemas = auditoria[auditoria["status_auditoria"] != "OK"].copy()
+                if len(problemas) == 0:
+                    st.success("Auditoria concluída: não foram encontradas inconsistências.")
+                else:
+                    st.error("Auditoria concluída com pendências.")
+                    st.dataframe(
+                        problemas[[
+                            "rubrica_codigo",
+                            "solicitacao_id",
+                            "descricao",
+                            "tipo_item",
+                            "valor_solicitado",
+                            "valor_cotado_vencedor",
+                            "valor_nf_item",
+                            "status_auditoria",
+                        ]],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            st.markdown("### Dados completos da auditoria")
+            st.dataframe(auditoria, use_container_width=True, hide_index=True)
 
 elif menu == "itens_comprados":
     df = query("""
