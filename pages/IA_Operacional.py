@@ -7,7 +7,6 @@ from ia_operacional import (
     carregar_score_risco_rubrica,
     gerar_alertas_ia,
     marcar_alerta_resolvido,
-    preparar_tabela_ia,
 )
 
 
@@ -26,6 +25,74 @@ def format_currency_brl(valor) -> str:
 
 def format_percent_brl(value) -> str:
     return f"{format_brl(value)}%"
+
+
+TEXTOS_PT_BR = {
+    "cotacao": "cotação",
+    "Cotacao": "Cotação",
+    "solicitacao": "solicitação",
+    "Solicitacao": "Solicitação",
+    "patrimonio": "patrimônio",
+    "Patrimonio": "Patrimônio",
+    "orcamento": "orçamento",
+    "Orcamento": "Orçamento",
+    "critica": "crítica",
+    "Critica": "Crítica",
+    "Pendencia": "Pendência",
+    "pendencia": "pendência",
+    "PENDENTE:": "Pendente:",
+    "ERRO:": "Erro:",
+    "ALERTA:": "Alerta:",
+}
+
+COLUNAS_IA = {
+    "id": "ID",
+    "tipo": "Tipo",
+    "titulo": "Título",
+    "descricao": "Descrição",
+    "gravidade": "Gravidade",
+    "origem": "Origem",
+    "tabela_origem": "Tabela de origem",
+    "registro_origem_id": "Registro de origem",
+    "status": "Status",
+    "sugestao_acao": "Sugestão de ação",
+    "criado_em": "Criado em",
+    "resolvido_em": "Resolvido em",
+}
+
+VALORES_IA = {
+    "rubrica_critica": "Rubrica crítica",
+    "saldo_insuficiente": "Saldo insuficiente",
+    "cotacao_atrasada": "Cotação atrasada",
+    "valor_divergente": "Valor divergente",
+    "item_sem_patrimonio": "Item sem patrimônio",
+    "item_sem_estoque": "Item sem estoque",
+    "nota_fiscal_pendente": "Nota fiscal pendente",
+    "fornecedor_recorrente": "Fornecedor recorrente",
+    "risco_orcamentario": "Risco orçamentário",
+    "baixa": "Baixa",
+    "media": "Média",
+    "alta": "Alta",
+    "pendente": "Pendente",
+    "resolvido": "Resolvido",
+}
+
+def normalizar_texto_portugues(valor):
+    if valor is None or pd.isna(valor):
+        return ""
+    texto = str(valor)
+    for origem, destino in TEXTOS_PT_BR.items():
+        texto = texto.replace(origem, destino)
+    return texto
+
+def preparar_tabela_ia(df: pd.DataFrame) -> pd.DataFrame:
+    tabela = df.rename(columns=COLUNAS_IA).copy()
+    for coluna in tabela.columns:
+        if tabela[coluna].dtype == "object" or pd.api.types.is_string_dtype(tabela[coluna]):
+            tabela[coluna] = tabela[coluna].apply(
+                lambda valor: VALORES_IA.get(str(valor), normalizar_texto_portugues(valor))
+            )
+    return tabela.fillna("")
 
 
 st.set_page_config(page_title="IA Operacional", layout="wide")
