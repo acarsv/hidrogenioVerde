@@ -9,6 +9,13 @@ import psycopg2.extras
 import streamlit as st
 from dotenv import load_dotenv
 from urllib.parse import urlparse
+from ia_operacional import (
+    carregar_alertas,
+    carregar_score_risco_rubrica,
+    criar_schema_ia_operacional,
+    gerar_alertas_ia,
+    marcar_alerta_resolvido,
+)
 
 load_dotenv(override=True)
 st.set_page_config(page_title="Hidrogênio Verde - Compras", layout="wide")
@@ -180,7 +187,7 @@ def ensure_permissions_schema():
 
     execute("""
     update usuarios_app
-    set permissoes = array['orcamento','nova_exigencia','solicitacoes','cotacoes','compra_nota','destino_final','auditoria','itens_comprados','membros']
+    set permissoes = array['orcamento','nova_exigencia','solicitacoes','cotacoes','compra_nota','destino_final','auditoria','ia_operacional','itens_comprados','membros']
     where papel = 'admin' and (permissoes is null or cardinality(permissoes) = 0)
     """)
 
@@ -844,6 +851,7 @@ def sincronizar_orcamento():
 try:
     ensure_permissions_schema()
     ensure_financial_governance_schema()
+    criar_schema_ia_operacional()
 except psycopg2.Error as exc:
     st.error("Nao foi possivel preparar o banco de dados para iniciar o app.")
     st.caption("Confira se as tabelas foram criadas no Supabase e reinicie o app no Streamlit Cloud.")
@@ -887,6 +895,7 @@ BASE_MENU_OPTIONS = [
     ("compra_nota", "Compra e nota fiscal"),
     ("destino_final", "Destino final"),
     ("auditoria", "Auditoria"),
+    ("ia_operacional", "IA Operacional e Auditoria de Gargalos"),
     ("itens_comprados", "Itens comprados"),
 ]
 ADMIN_MENU_OPTIONS = BASE_MENU_OPTIONS + [("membros", "Membros")]
@@ -1976,6 +1985,122 @@ elif menu == "auditoria":
 
             st.markdown("### Dados completos da auditoria")
             st.dataframe(preparar_tabela_auditoria(auditoria), use_container_width=True, hide_index=True)
+
+elif menu == "ia_operacional":
+    st.caption("Painel de IA Operacional: alertas automaticos, score de risco por rubrica e gargalos do processo.")
+
+    if st.button("Executar análise IA", type="primary"):
+        resultado = gerar_alertas_ia()
+        st.success(
+            f"Análise concluída: {resultado['criados']} alerta(s) criado(s), "
+            f"{resultado['atualizados']} atualizado(s)."
+        )
+        st.rerun()
+
+    alertas = carregar_alertas("pendente")
+    total_alertas = len(alertas)
+    alertas_criticos = len(alertas[alertas["gravidade"] == "alta"]) if total_alertas else 0
+    pontos_atencao = len(alertas[alertas["gravidade"].isin(["media", "baixa"])]) if total_alertas else 0
+    situacao_normal = 1 if total_alertas == 0 else 0
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Alertas críticos", alertas_criticos)
+    c2.metric("Pontos de atenção", pontos_atencao)
+    c3.metric("Situação normal", "Sim" if situacao_normal else "Não")
+
+    with st.expander("Alertas críticos", expanded=True):
+        criticos = alertas[alertas["gravidade"] == "alta"] if total_alertas else pd.DataFrame()
+        if len(criticos) == 0:
+            st.success("Nenhum alerta crítico pendente.")
+        else:
+            st.dataframe(
+                criticos[["id", "tipo", "titulo", "descricao", "sugestao_acao", "criado_em"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    with st.expander("Pontos de atenção", expanded=True):
+        atencao = alertas[alertas["gravidade"].isin(["media", "baixa"])] if total_alertas else pd.DataFrame()
+        if len(atencao) == 0:
+            st.success("Nenhum ponto de atenção pendente.")
+        else:
+            st.dataframe(
+                atencao[["id", "tipo", "titulo", "descricao", "sugestao_acao", "criado_em"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    with st.expander("Score de risco por rubrica", expanded=True):
+        score = carregar_score_risco_rubrica()
+        if len(score) == 0:
+            st.info("Nenhuma rubrica encontrada para cálculo de risco.")
+        else:
+            score_tabela = score.rename(columns={
+                "codigo": "Rubrica",
+                "nome": "Nome",
+                "valor_orcado": "Valor orçado",
+                "valor_reservado": "Valor reservado",
+                "valor_utilizado": "Valor utilizado",
+                "valor_comprometido": "Valor comprometido",
+                "valor_solicitado": "Valor solicitado",
+                "percentual_comprometido": "Percentual comprometido",
+            }).copy()
+            for coluna in [
+                "Valor orçado",
+                "Valor reservado",
+                "Valor utilizado",
+                "Valor comprometido",
+                "Valor solicitado",
+            ]:
+                if coluna in score_tabela.columns:
+                    score_tabela[coluna] = score_tabela[coluna].apply(format_currency_brl)
+            if "Percentual comprometido" in score_tabela.columns:
+                score_tabela["Percentual comprometido"] = score_tabela["Percentual comprometido"].apply(format_percent_brl)
+            st.dataframe(score_tabela, use_container_width=True, hide_index=True)
+
+    with st.expander("Gargalos de estoque/patrimônio", expanded=True):
+        gargalos_destino = alertas[alertas["tipo"].isin(["item_sem_patrimonio", "item_sem_estoque"])] if total_alertas else pd.DataFrame()
+        if len(gargalos_destino) == 0:
+            st.success("Nenhum gargalo de estoque ou patrimônio pendente.")
+        else:
+            st.dataframe(
+                gargalos_destino[["id", "titulo", "descricao", "sugestao_acao"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    with st.expander("Gargalos financeiros", expanded=True):
+        gargalos_financeiros = alertas[alertas["tipo"].isin(["rubrica_critica", "saldo_insuficiente", "valor_divergente", "risco_orcamentario"])] if total_alertas else pd.DataFrame()
+        if len(gargalos_financeiros) == 0:
+            st.success("Nenhum gargalo financeiro pendente.")
+        else:
+            st.dataframe(
+                gargalos_financeiros[["id", "tipo", "titulo", "descricao", "sugestao_acao"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    if total_alertas:
+        st.markdown("### Marcar alerta como resolvido")
+        alerta_id = st.selectbox(
+            "Alerta pendente",
+            alertas["id"].tolist(),
+            format_func=lambda item_id: (
+                f"#{item_id} - {alertas.loc[alertas.id == item_id, 'titulo'].iloc[0]}"
+            ),
+            key="ia_alerta_resolver",
+        )
+        if st.button("Marcar como resolvido"):
+            marcar_alerta_resolvido(alerta_id)
+            st.success("Alerta marcado como resolvido.")
+            st.rerun()
+
+    with st.expander("Todos os alertas registrados"):
+        todos_alertas = carregar_alertas("todos")
+        if len(todos_alertas) == 0:
+            st.info("Nenhum alerta registrado.")
+        else:
+            st.dataframe(todos_alertas, use_container_width=True, hide_index=True)
 
 elif menu == "itens_comprados":
     df = query("""
