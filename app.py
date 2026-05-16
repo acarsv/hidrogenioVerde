@@ -15,6 +15,8 @@ from ia_operacional import (
     criar_schema_ia_operacional,
     gerar_alertas_ia,
     marcar_alerta_resolvido,
+    normalizar_texto_portugues,
+    preparar_tabela_ia,
 )
 
 load_dotenv(override=True)
@@ -381,9 +383,12 @@ COLUNAS_VALOR_AUDITORIA = {
 
 def preparar_tabela_auditoria(df: pd.DataFrame) -> pd.DataFrame:
     tabela = df.rename(columns=COLUNAS_AUDITORIA).copy()
+    for coluna in tabela.columns:
+        if tabela[coluna].dtype == "object" or pd.api.types.is_string_dtype(tabela[coluna]):
+            tabela[coluna] = tabela[coluna].apply(normalizar_texto_portugues)
     for coluna in COLUNAS_VALOR_AUDITORIA.intersection(tabela.columns):
         tabela[coluna] = tabela[coluna].apply(format_currency_brl)
-    return tabela
+    return tabela.fillna("")
 
 @st.dialog("Atualizar responsáveis")
 def atualizar_responsaveis_dialog():
@@ -1928,7 +1933,7 @@ elif menu == "auditoria":
                             format_func=lambda item_id: (
                                 f"Solicitação {problemas_retorno.loc[problemas_retorno.pedido_item_id == item_id, 'solicitacao_id'].iloc[0]} - "
                                 f"{problemas_retorno.loc[problemas_retorno.pedido_item_id == item_id, 'descricao'].iloc[0]} - "
-                                f"{problemas_retorno.loc[problemas_retorno.pedido_item_id == item_id, 'status_auditoria'].iloc[0]}"
+                                f"{normalizar_texto_portugues(problemas_retorno.loc[problemas_retorno.pedido_item_id == item_id, 'status_auditoria'].iloc[0])}"
                             ),
                             key="auditoria_item_corrigir",
                         )
@@ -2014,7 +2019,7 @@ elif menu == "ia_operacional":
             st.success("Nenhum alerta crítico pendente.")
         else:
             st.dataframe(
-                criticos[["id", "tipo", "titulo", "descricao", "sugestao_acao", "criado_em"]],
+                preparar_tabela_ia(criticos[["id", "tipo", "titulo", "descricao", "sugestao_acao", "criado_em"]]),
                 use_container_width=True,
                 hide_index=True,
             )
@@ -2025,7 +2030,7 @@ elif menu == "ia_operacional":
             st.success("Nenhum ponto de atenção pendente.")
         else:
             st.dataframe(
-                atencao[["id", "tipo", "titulo", "descricao", "sugestao_acao", "criado_em"]],
+                preparar_tabela_ia(atencao[["id", "tipo", "titulo", "descricao", "sugestao_acao", "criado_em"]]),
                 use_container_width=True,
                 hide_index=True,
             )
@@ -2064,7 +2069,7 @@ elif menu == "ia_operacional":
             st.success("Nenhum gargalo de estoque ou patrimônio pendente.")
         else:
             st.dataframe(
-                gargalos_destino[["id", "titulo", "descricao", "sugestao_acao"]],
+                preparar_tabela_ia(gargalos_destino[["id", "titulo", "descricao", "sugestao_acao"]]),
                 use_container_width=True,
                 hide_index=True,
             )
@@ -2075,7 +2080,7 @@ elif menu == "ia_operacional":
             st.success("Nenhum gargalo financeiro pendente.")
         else:
             st.dataframe(
-                gargalos_financeiros[["id", "tipo", "titulo", "descricao", "sugestao_acao"]],
+                preparar_tabela_ia(gargalos_financeiros[["id", "tipo", "titulo", "descricao", "sugestao_acao"]]),
                 use_container_width=True,
                 hide_index=True,
             )
@@ -2100,7 +2105,7 @@ elif menu == "ia_operacional":
         if len(todos_alertas) == 0:
             st.info("Nenhum alerta registrado.")
         else:
-            st.dataframe(todos_alertas, use_container_width=True, hide_index=True)
+            st.dataframe(preparar_tabela_ia(todos_alertas), use_container_width=True, hide_index=True)
 
 elif menu == "itens_comprados":
     df = query("""

@@ -116,6 +116,80 @@ def decimal_value(value):
         return Decimal("0")
 
 
+TEXTOS_PT_BR = {
+    "cotacao": "cotação",
+    "Cotacao": "Cotação",
+    "solicitacao": "solicitação",
+    "Solicitacao": "Solicitação",
+    "patrimonio": "patrimônio",
+    "Patrimonio": "Patrimônio",
+    "orcamento": "orçamento",
+    "Orcamento": "Orçamento",
+    "critica": "crítica",
+    "Critica": "Crítica",
+    "Pendencia": "Pendência",
+    "pendencia": "pendência",
+    "descricao": "descrição",
+    "Descricao": "Descrição",
+    "esta": "está",
+    "ja": "já",
+    "ha": "há",
+    "nao": "não",
+    "PENDENTE:": "Pendente:",
+    "ERRO:": "Erro:",
+    "ALERTA:": "Alerta:",
+}
+
+COLUNAS_IA = {
+    "id": "ID",
+    "tipo": "Tipo",
+    "titulo": "Título",
+    "descricao": "Descrição",
+    "gravidade": "Gravidade",
+    "origem": "Origem",
+    "tabela_origem": "Tabela de origem",
+    "registro_origem_id": "Registro de origem",
+    "status": "Status",
+    "sugestao_acao": "Sugestão de ação",
+    "criado_em": "Criado em",
+    "resolvido_em": "Resolvido em",
+}
+
+VALORES_IA = {
+    "rubrica_critica": "Rubrica crítica",
+    "saldo_insuficiente": "Saldo insuficiente",
+    "cotacao_atrasada": "Cotação atrasada",
+    "valor_divergente": "Valor divergente",
+    "item_sem_patrimonio": "Item sem patrimônio",
+    "item_sem_estoque": "Item sem estoque",
+    "nota_fiscal_pendente": "Nota fiscal pendente",
+    "fornecedor_recorrente": "Fornecedor recorrente",
+    "risco_orcamentario": "Risco orçamentário",
+    "baixa": "Baixa",
+    "media": "Média",
+    "alta": "Alta",
+    "pendente": "Pendente",
+    "resolvido": "Resolvido",
+}
+
+
+def normalizar_texto_portugues(valor):
+    if valor is None or pd.isna(valor):
+        return ""
+    texto = str(valor)
+    for origem, destino in TEXTOS_PT_BR.items():
+        texto = texto.replace(origem, destino)
+    return texto
+
+
+def preparar_tabela_ia(df):
+    tabela = df.rename(columns=COLUNAS_IA).copy()
+    for coluna in tabela.columns:
+        if tabela[coluna].dtype == "object" or pd.api.types.is_string_dtype(tabela[coluna]):
+            tabela[coluna] = tabela[coluna].apply(lambda valor: VALORES_IA.get(str(valor), normalizar_texto_portugues(valor)))
+    return tabela.fillna("")
+
+
 def registrar_alerta(alerta):
     existente = query(
         """
@@ -187,16 +261,16 @@ def verificar_rubrica_critica(rubrica):
     if percentual >= Decimal("80"):
         return {
             "tipo": "rubrica_critica",
-            "titulo": f"Rubrica critica: {rubrica['codigo']}",
+            "titulo": f"Rubrica crítica: {rubrica['codigo']}",
             "descricao": (
-                f"A rubrica {rubrica['nome']} ja comprometeu "
-                f"{percentual:.2f}% do orcamento."
+                f"A rubrica {rubrica['nome']} já comprometeu "
+                f"{percentual:.2f}% do orçamento."
             ),
             "gravidade": "alta" if percentual >= Decimal("90") else "media",
             "origem": "score_risco_rubrica",
             "tabela_origem": "rubricas",
             "registro_origem_id": int(rubrica["id"]),
-            "sugestao_acao": "Revisar solicitacoes pendentes antes de aprovar novas compras.",
+            "sugestao_acao": "Revisar solicitações pendentes antes de aprovar novas compras.",
         }
     return None
 
@@ -227,13 +301,13 @@ def analisar_cotacoes():
     for _, row in atrasadas.iterrows():
         alertas.append({
             "tipo": "cotacao_atrasada",
-            "titulo": f"Cotacao atrasada: solicitacao #{row['id']}",
-            "descricao": f"A solicitacao {row['descricao']} esta parada em cotacao ha mais de 7 dias.",
+            "titulo": f"Cotação atrasada: solicitação #{row['id']}",
+            "descricao": f"A solicitação {row['descricao']} está parada em cotação há mais de 7 dias.",
             "gravidade": "media",
             "origem": "solicitacoes_compra",
             "tabela_origem": "solicitacoes_compra",
             "registro_origem_id": int(row["id"]),
-            "sugestao_acao": "Verificar fornecedores pendentes e atualizar a cotacao.",
+            "sugestao_acao": "Verificar fornecedores pendentes e atualizar a cotação.",
         })
     return alertas
 
@@ -258,23 +332,23 @@ def analisar_compras():
         status = str(row["status_auditoria"])
         tipo = "risco_orcamentario"
         gravidade = "media"
-        sugestao = "Abrir a auditoria e corrigir a pendencia."
+        sugestao = "Abrir a auditoria e corrigir a pendência."
 
         if "valor cotado" in status or "valor da NF" in status:
             tipo = "valor_divergente"
             gravidade = "alta"
-            sugestao = "Voltar o item para cotacao ou ajustar o valor solicitado quando a NF estiver correta."
+            sugestao = "Voltar o item para cotação ou ajustar o valor solicitado quando a NF estiver correta."
         elif "nota fiscal" in status or "NF sem" in status:
             tipo = "nota_fiscal_pendente"
-        elif "patrimonio" in status:
+        elif "patrimonio" in status or "patrimônio" in status:
             tipo = "item_sem_patrimonio"
         elif "estoque" in status:
             tipo = "item_sem_estoque"
 
         alertas.append({
             "tipo": tipo,
-            "titulo": f"Pendencia de auditoria: solicitacao #{row['solicitacao_id']}",
-            "descricao": f"{row['descricao']}: {status}",
+            "titulo": f"Pendência de auditoria: solicitação #{row['solicitacao_id']}",
+            "descricao": normalizar_texto_portugues(f"{row['descricao']}: {status}"),
             "gravidade": gravidade,
             "origem": "vw_auditoria_itens_projeto",
             "tabela_origem": "solicitacoes_compra",

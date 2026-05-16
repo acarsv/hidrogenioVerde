@@ -7,6 +7,7 @@ from ia_operacional import (
     carregar_score_risco_rubrica,
     gerar_alertas_ia,
     marcar_alerta_resolvido,
+    preparar_tabela_ia,
 )
 
 
@@ -56,7 +57,7 @@ with st.expander("Alertas pendentes", expanded=True):
     if total_alertas == 0:
         st.success("Nenhum alerta pendente.")
     else:
-        st.dataframe(alertas, use_container_width=True, hide_index=True)
+        st.dataframe(preparar_tabela_ia(alertas), use_container_width=True, hide_index=True)
 
 with st.expander("Score de risco por rubrica", expanded=True):
     score = carregar_score_risco_rubrica()
@@ -91,14 +92,14 @@ with st.expander("Gargalos de estoque/patrimônio"):
     if len(gargalos_destino) == 0:
         st.success("Nenhum gargalo de estoque ou patrimônio pendente.")
     else:
-        st.dataframe(gargalos_destino, use_container_width=True, hide_index=True)
+        st.dataframe(preparar_tabela_ia(gargalos_destino), use_container_width=True, hide_index=True)
 
 with st.expander("Gargalos financeiros"):
     gargalos_financeiros = alertas[alertas["tipo"].isin(["rubrica_critica", "saldo_insuficiente", "valor_divergente", "risco_orcamentario"])] if total_alertas else pd.DataFrame()
     if len(gargalos_financeiros) == 0:
         st.success("Nenhum gargalo financeiro pendente.")
     else:
-        st.dataframe(gargalos_financeiros, use_container_width=True, hide_index=True)
+        st.dataframe(preparar_tabela_ia(gargalos_financeiros), use_container_width=True, hide_index=True)
 
 if total_alertas:
     st.markdown("### Marcar alerta como resolvido")
