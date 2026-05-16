@@ -214,6 +214,20 @@ def format_currency_brl_markdown(valor) -> str:
 def format_percent_brl(value) -> str:
     return f"{format_brl(value)}%"
 
+def parse_currency_brl(value) -> Decimal:
+    if value is None or pd.isna(value):
+        return Decimal("0")
+    if isinstance(value, (int, float, Decimal)):
+        return Decimal(str(value))
+    texto = str(value).strip()
+    texto = texto.replace("R$", "").replace(" ", "")
+    if "," in texto:
+        texto = texto.replace(".", "").replace(",", ".")
+    try:
+        return Decimal(texto)
+    except (InvalidOperation, ValueError):
+        return Decimal("0")
+
 TEXTOS_PT_BR = {
     "cotacao": "cotação",
     "Cotacao": "Cotação",
@@ -1400,8 +1414,8 @@ elif menu == "cotacoes":
                 "Item": item["descricao"],
                 "Tipo": item["tipo_item"],
                 "Quantidade": float(existente.iloc[0]["quantidade"] if len(existente) else item["quantidade"]),
-                "Valor unitario": float(existente.iloc[0]["valor_unitario"] if len(existente) else item["valor_unitario"]),
-                "Observacoes": existente.iloc[0]["observacoes"] if len(existente) else "",
+                "Valor unitário": format_currency_brl(existente.iloc[0]["valor_unitario"] if len(existente) else item["valor_unitario"]),
+                "Observações": existente.iloc[0]["observacoes"] if len(existente) else "",
             })
 
         cotacao_itens_editados = st.data_editor(
@@ -1412,14 +1426,17 @@ elif menu == "cotacoes":
             column_config={
                 "pedido_item_id": None,
                 "Quantidade": st.column_config.NumberColumn("Quantidade", min_value=0.01, format="%.2f"),
-                "Valor unitario": st.column_config.NumberColumn("Valor unitario", min_value=0.0, format="R$ %.2f"),
-                "Observacoes": st.column_config.TextColumn("Observacoes"),
+                "Valor unitário": st.column_config.TextColumn("Valor unitário"),
+                "Observações": st.column_config.TextColumn("Observações"),
             },
             key=f"cotacao_itens_{sid}_{ordem}",
         )
         cotacao_itens_editados["Quantidade"] = pd.to_numeric(cotacao_itens_editados["Quantidade"], errors="coerce").fillna(0)
-        cotacao_itens_editados["Valor unitario"] = pd.to_numeric(cotacao_itens_editados["Valor unitario"], errors="coerce").fillna(0)
-        cotacao_itens_editados["Valor total"] = cotacao_itens_editados["Quantidade"] * cotacao_itens_editados["Valor unitario"]
+        cotacao_itens_editados["Valor unitário numérico"] = cotacao_itens_editados["Valor unitário"].apply(parse_currency_brl)
+        cotacao_itens_editados["Valor total"] = (
+            cotacao_itens_editados["Quantidade"].apply(lambda valor: Decimal(str(valor)))
+            * cotacao_itens_editados["Valor unitário numérico"]
+        )
         valor_total = float(cotacao_itens_editados["Valor total"].sum())
         st.metric("Total da cotação", format_currency_brl(valor_total))
 
@@ -1428,6 +1445,8 @@ elif menu == "cotacoes":
                 st.error("Informe o fornecedor.")
             elif (cotacao_itens_editados["Quantidade"] <= 0).any():
                 st.error("Todos os itens cotados devem ter quantidade maior que zero.")
+            elif (cotacao_itens_editados["Valor unitário numérico"] < 0).any():
+                st.error("Todos os valores unitários devem ser maiores ou iguais a zero.")
             else:
                 cotacao_salva = query("""
             insert into cotacoes (solicitacao_id,ordem,fornecedor,cnpj_cpf,telefone_email,valor_unitario,valor_total,prazo_entrega,forma_pagamento)
@@ -1447,18 +1466,15 @@ elif menu == "cotacoes":
                         cotacao_id,
                         item["pedido_item_id"],
                         Decimal(str(item["Quantidade"])),
-                        Decimal(str(item["Valor unitario"])),
-                        str(item.get("Observacoes") or "").strip() or None,
+                        item["Valor unitário numérico"],
+                        str(item.get("Observações") or "").strip() or None,
                     ))
                 execute("update solicitacoes_compra set status='cotado' where id=%s", (sid,))
                 st.success("Cotação por item salva.")
-        st.dataframe(
-            query('select ordem, fornecedor, valor_total as "Valor total", prazo_entrega, forma_pagamento from cotacoes where solicitacao_id=%s order by ordem', (sid,)),
-            use_container_width=True,
-            column_config={
-                "Valor total": st.column_config.NumberColumn("Valor total", format="R$ %.2f"),
-            },
-        )
+        cotacoes_salvas = query('select ordem, fornecedor, valor_total as "Valor total", prazo_entrega, forma_pagamento from cotacoes where solicitacao_id=%s order by ordem', (sid,))
+        if len(cotacoes_salvas):
+            cotacoes_salvas["Valor total"] = cotacoes_salvas["Valor total"].apply(format_currency_brl)
+        st.dataframe(cotacoes_salvas, use_container_width=True, hide_index=True)
 
 elif menu == "compra_nota":
     solicitacoes_compra = query("""
