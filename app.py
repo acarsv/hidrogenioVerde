@@ -1677,7 +1677,7 @@ elif menu == "cotacoes":
                         except RuntimeError as exc:
                             st.error(str(exc))
                             st.stop()
-                    item_ancora_id = int(itens_editados.iloc[0]["pedido_item_id"])
+                    item_ancora_id = itens_editados.iloc[0]["pedido_item_id"]
                     solicitacao_ancora_id = int(cotacao_atual.get("solicitacao_id") or pedido_itens.loc[pedido_itens.id == item_ancora_id, "pedido_id"].iloc[0])
                     cotacao_por_ordem = query("""
                     select c.id
