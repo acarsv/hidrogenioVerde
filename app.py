@@ -2025,7 +2025,7 @@ elif menu == "cotacoes":
 
 elif menu == "compra_nota":
     solicitacoes_compra = query("""
-    select id, descricao
+    select id, rubrica_id, descricao
     from solicitacoes_compra
     where autorizado=true and status in ('cotado','aguardando_nota')
     order by id desc
@@ -2034,6 +2034,7 @@ elif menu == "compra_nota":
         st.info("Não há solicitações pendentes para compra ou nota fiscal.")
         st.stop()
     sid = st.selectbox("Solicitação", solicitacoes_compra["id"].tolist(), format_func=lambda x: f"#{x} - {solicitacoes_compra.loc[solicitacoes_compra.id==x,'descricao'].iloc[0][:80]}")
+    rubrica_compra_id = int(solicitacoes_compra.loc[solicitacoes_compra.id == sid, "rubrica_id"].iloc[0])
     if st.button("Cancelar compra"):
         cancelar_solicitacao(sid, user["id"])
         st.success("Compra cancelada e solicitação removida dos registros ativos.")
@@ -2053,10 +2054,11 @@ elif menu == "compra_nota":
       ci.vencedor
     from cotacao_itens ci
     join cotacoes c on c.id = ci.cotacao_id
+    left join solicitacoes_compra sc on sc.id = c.solicitacao_id
     join pedido_itens pi on pi.id = ci.pedido_item_id
-    where c.solicitacao_id=%s
+    where coalesce(c.rubrica_id, sc.rubrica_id)=%s
     order by pi.descricao, c.ordem
-    """, (sid,))
+    """, (rubrica_compra_id,))
     if len(cotacoes_itens_df) == 0:
         st.warning("Não há itens cotados para essa solicitação.")
         st.stop()
@@ -2072,11 +2074,12 @@ elif menu == "compra_nota":
       count(ci.id) as total_itens,
       c.vencedora
     from cotacoes c
+    left join solicitacoes_compra sc on sc.id = c.solicitacao_id
     join cotacao_itens ci on ci.cotacao_id = c.id
-    where c.solicitacao_id=%s
+    where coalesce(c.rubrica_id, sc.rubrica_id)=%s
     group by c.id, c.ordem, c.fornecedor, c.prazo_entrega, c.arquivo_url, c.vencedora
     order by valor_total asc, c.ordem
-    """, (sid,))
+    """, (rubrica_compra_id,))
 
     st.markdown("### Propostas recebidas")
     cotacoes_resumo_exibicao = cotacoes_resumo.copy()
@@ -2133,9 +2136,17 @@ elif menu == "compra_nota":
             update cotacao_itens ci
             set vencedor=false
             from cotacoes c
-            where c.id = ci.cotacao_id and c.solicitacao_id=%s
-            """, (sid,))
-            execute("update cotacoes set vencedora=false where solicitacao_id=%s", (sid,))
+            left join solicitacoes_compra sc on sc.id = c.solicitacao_id
+            where c.id = ci.cotacao_id
+              and coalesce(c.rubrica_id, sc.rubrica_id)=%s
+            """, (rubrica_compra_id,))
+            execute("""
+            update cotacoes c
+            set vencedora=false
+            from solicitacoes_compra sc
+            where sc.id = c.solicitacao_id
+              and coalesce(c.rubrica_id, sc.rubrica_id)=%s
+            """, (rubrica_compra_id,))
             execute("update cotacao_itens set vencedor=true where cotacao_id=%s", (int(cotacao_vencedora_id),))
             execute("update cotacoes set vencedora=true where id=%s", (int(cotacao_vencedora_id),))
             valor = Decimal(str(itens_cotacao_selecionada["Valor total"].sum()))
@@ -2147,7 +2158,13 @@ elif menu == "compra_nota":
               valor_compra=excluded.valor_compra,
               comprador_id=excluded.comprador_id
             """, (sid, int(cotacao_vencedora_id), valor, user["id"]))
-            execute("update solicitacoes_compra set status='aguardando_nota' where id=%s", (sid,))
+            solicitacoes_compra_vencedora = query("""
+            select distinct pi.pedido_id
+            from pedido_itens pi
+            where pi.id = any(%s)
+            """, (itens_cotacao_selecionada["pedido_item_id"].tolist(),))
+            for solicitacao_compra_id in solicitacoes_compra_vencedora["pedido_id"].dropna().tolist():
+                execute("update solicitacoes_compra set status='aguardando_nota' where id=%s", (int(solicitacao_compra_id),))
             sincronizar_orcamento()
             st.success("Compra registrada pela cotacao vencedora. Orcamento atualizado e status: aguardando nota.")
 
@@ -2155,8 +2172,12 @@ elif menu == "compra_nota":
     compra_df = query("""
     select c.id, c.valor_compra
     from compras c
-    where c.solicitacao_id=%s
-    """, (sid,))
+    join cotacoes co on co.id = c.cotacao_vencedora_id
+    left join solicitacoes_compra sc on sc.id = co.solicitacao_id
+    where coalesce(co.rubrica_id, sc.rubrica_id)=%s
+    order by c.comprado_em desc
+    limit 1
+    """, (rubrica_compra_id,))
     if len(compra_df) == 0:
         st.info("Registre a compra desta solicitação antes de lançar a nota fiscal.")
     else:
@@ -2174,17 +2195,20 @@ elif menu == "compra_nota":
           c.fornecedor
         from cotacao_itens ci
         join cotacoes c on c.id = ci.cotacao_id
+        left join solicitacoes_compra sc on sc.id = c.solicitacao_id
         join pedido_itens pi on pi.id = ci.pedido_item_id
-        where c.solicitacao_id=%s and ci.vencedor=true
+        where coalesce(c.rubrica_id, sc.rubrica_id)=%s and ci.vencedor=true
         order by c.fornecedor, pi.descricao
-        """, (sid,))
+        """, (rubrica_compra_id,))
         itens_lancados = query("""
         select pedido_item_id
         from nota_fiscal_itens nfi
         join pedido_itens pi on pi.id = nfi.pedido_item_id
-        where pi.pedido_id=%s and nfi.pedido_item_id is not null
-        """, (sid,))
+        where pi.rubrica_id=%s and nfi.pedido_item_id is not null
+        """, (rubrica_compra_id,))
         ids_lancados = set(itens_lancados["pedido_item_id"].tolist()) if len(itens_lancados) else set()
+        ids_vencedores = set(itens_vencedores["pedido_item_id"].tolist()) if len(itens_vencedores) else set()
+        ids_vencedores_lancados = ids_lancados.intersection(ids_vencedores)
         itens_pendentes = itens_vencedores[~itens_vencedores["pedido_item_id"].isin(ids_lancados)].copy()
 
         if len(itens_pendentes) == 0:
@@ -2304,17 +2328,22 @@ elif menu == "compra_nota":
                         Decimal(str(item_nf["Valor unitario NF"])),
                     ))
                 total_itens = len(itens_vencedores)
-                total_lancado = len(ids_lancados) + len(itens_nf_df)
+                total_lancado = len(ids_vencedores_lancados) + len(itens_nf_df)
                 if total_lancado >= total_itens:
                     total_real_nf = query("""
                     select coalesce(sum(nfi.valor_total), 0) as valor_total_real
                     from nota_fiscal_itens nfi
-                    join pedido_itens pi on pi.id = nfi.pedido_item_id
-                    where pi.pedido_id=%s
-                    """, (sid,))
+                    where nfi.pedido_item_id = any(%s)
+                    """, (itens_vencedores["pedido_item_id"].tolist(),))
                     valor_total_real = Decimal(str(total_real_nf.iloc[0]["valor_total_real"])) if len(total_real_nf) else Decimal("0")
                     execute("update compras set valor_compra=%s where id=%s", (valor_total_real, compra_id))
-                    execute("update solicitacoes_compra set status='finalizado' where id=%s", (sid,))
+                    solicitacoes_finalizadas = query("""
+                    select distinct pedido_id
+                    from pedido_itens
+                    where id = any(%s)
+                    """, (itens_vencedores["pedido_item_id"].tolist(),))
+                    for solicitacao_finalizada_id in solicitacoes_finalizadas["pedido_id"].dropna().tolist():
+                        execute("update solicitacoes_compra set status='finalizado' where id=%s", (int(solicitacao_finalizada_id),))
                     st.success("Nota fiscal lançada. Todos os itens foram conferidos e a compra foi finalizada.")
                 else:
                     st.success("Nota fiscal lançada. Ainda há itens pendentes de NF.")
