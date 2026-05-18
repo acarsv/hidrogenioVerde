@@ -141,6 +141,14 @@ def ensure_financial_governance_schema():
         execute("alter table cotacoes add column arquivo_url text")
     if not has_column("cotacoes", "observacoes"):
         execute("alter table cotacoes add column observacoes text")
+    if not has_column("cotacoes", "rubrica_id"):
+        execute("alter table cotacoes add column rubrica_id bigint references rubricas(id)")
+        execute("""
+        update cotacoes c
+        set rubrica_id = s.rubrica_id
+        from solicitacoes_compra s
+        where s.id = c.solicitacao_id and c.rubrica_id is null
+        """)
     if not has_column("cotacao_itens", "descricao_item"):
         execute("alter table cotacao_itens add column descricao_item text")
     if not has_column("cotacao_itens", "tipo_item"):
@@ -1432,17 +1440,42 @@ elif menu == "solicitacoes":
                 st.rerun()
 
 elif menu == "cotacoes":
-    solicitacoes = query("select id, descricao, quantidade, valor_estimado from solicitacoes_compra where autorizado=true and status in ('em_andamento','cotado') order by id desc")
+    rubricas_cotacao = query("""
+    select distinct r.id, r.codigo, r.nome
+    from rubricas r
+    join solicitacoes_compra s on s.rubrica_id = r.id
+    join pedido_itens pi on pi.pedido_id = s.id
+    where s.autorizado=true
+      and s.status in ('em_andamento','cotado')
+    order by r.codigo, r.nome
+    """)
+    solicitacoes = rubricas_cotacao
     if len(solicitacoes) == 0:
         st.warning("Não há solicitações autorizadas para cotação.")
     else:
-        sid = st.selectbox("Solicitação", solicitacoes["id"].tolist(), format_func=lambda x: f"#{x} - {solicitacoes.loc[solicitacoes.id==x,'descricao'].iloc[0][:80]}")
+        rubrica_id = st.selectbox(
+            "Rubrica",
+            rubricas_cotacao["id"].tolist(),
+            format_func=lambda x: f"{rubricas_cotacao.loc[rubricas_cotacao.id==x,'codigo'].iloc[0]} - {rubricas_cotacao.loc[rubricas_cotacao.id==x,'nome'].iloc[0]}",
+        )
+        sid = f"rubrica_{rubrica_id}"
         pedido_itens = query("""
-        select id, descricao, tipo_item, quantidade, valor_unitario, valor_total
-        from pedido_itens
-        where pedido_id=%s
-        order by created_at, descricao
-        """, (sid,))
+        select
+          pi.id,
+          pi.pedido_id,
+          s.descricao as solicitacao,
+          pi.descricao,
+          pi.tipo_item,
+          pi.quantidade,
+          pi.valor_unitario,
+          pi.valor_total
+        from pedido_itens pi
+        join solicitacoes_compra s on s.id = pi.pedido_id
+        where s.rubrica_id=%s
+          and s.autorizado=true
+          and s.status in ('em_andamento','cotado')
+        order by s.id desc, pi.created_at, pi.descricao
+        """, (rubrica_id,))
         if len(pedido_itens) == 0:
             st.warning("Esta solicitação ainda não tem itens do pedido. Recrie pela tela Nova exigência ou migre os itens antes de cotar.")
             st.stop()
@@ -1451,6 +1484,7 @@ elif menu == "cotacoes":
         cotacoes_salvas_v2 = query("""
         select
           c.id,
+          c.solicitacao_id,
           c.ordem,
           c.fornecedor,
           c.cnpj_cpf,
@@ -1461,11 +1495,12 @@ elif menu == "cotacoes":
           count(ci.id) as total_itens,
           coalesce(sum(ci.valor_total), c.valor_total, 0) as valor_total
         from cotacoes c
+        left join solicitacoes_compra s on s.id = c.solicitacao_id
         left join cotacao_itens ci on ci.cotacao_id = c.id
-        where c.solicitacao_id=%s
-        group by c.id, c.ordem, c.fornecedor, c.cnpj_cpf, c.telefone_email, c.prazo_entrega, c.arquivo_url, c.observacoes, c.valor_total
+        where coalesce(c.rubrica_id, s.rubrica_id)=%s
+        group by c.id, c.solicitacao_id, c.ordem, c.fornecedor, c.cnpj_cpf, c.telefone_email, c.prazo_entrega, c.arquivo_url, c.observacoes, c.valor_total
         order by c.ordem
-        """, (sid,))
+        """, (rubrica_id,))
 
         def cotacao_v2_itens(cotacao_id):
             return query("""
@@ -1554,7 +1589,15 @@ elif menu == "cotacoes":
             observacoes_gerais = st.text_area("Observacoes gerais", key=f"{prefixo}_observacoes")
 
             st.markdown("### Adicionar item")
-            item_id = st.selectbox("Item da solicitacao", pedido_itens["id"].tolist(), format_func=lambda valor: pedido_itens.loc[pedido_itens.id == valor, "descricao"].iloc[0], key=f"{prefixo}_item")
+            item_id = st.selectbox(
+                "Item da rubrica",
+                pedido_itens["id"].tolist(),
+                format_func=lambda valor: (
+                    f"Solicitacao #{int(pedido_itens.loc[pedido_itens.id == valor, 'pedido_id'].iloc[0])} - "
+                    f"{pedido_itens.loc[pedido_itens.id == valor, 'descricao'].iloc[0]}"
+                ),
+                key=f"{prefixo}_item",
+            )
             item_base = pedido_itens[pedido_itens["id"] == item_id].iloc[0]
             descricao_item = st.text_input("Descricao do produto", value=str(item_base["descricao"]), key=f"{prefixo}_desc_{item_id}")
             tipo_item = st.text_input("Tipo", value=str(item_base["tipo_item"]), key=f"{prefixo}_tipo_{item_id}")
@@ -1634,15 +1677,37 @@ elif menu == "cotacoes":
                         except RuntimeError as exc:
                             st.error(str(exc))
                             st.stop()
-                    cotacao_salva = query("""
-                    insert into cotacoes (solicitacao_id,ordem,fornecedor,cnpj_cpf,telefone_email,valor_unitario,valor_total,prazo_entrega,forma_pagamento,arquivo_url,observacoes)
-                    values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    on conflict (solicitacao_id,ordem) do update set fornecedor=excluded.fornecedor, cnpj_cpf=excluded.cnpj_cpf,
-                    telefone_email=excluded.telefone_email, valor_unitario=excluded.valor_unitario, valor_total=excluded.valor_total,
-                    prazo_entrega=excluded.prazo_entrega, forma_pagamento=excluded.forma_pagamento, arquivo_url=excluded.arquivo_url,
-                    observacoes=excluded.observacoes
-                    returning id
-                    """, (sid, ordem, fornecedor, cnpj, contato, 0, valor_total, prazo, "", arquivo_url_final, observacoes_gerais.strip() or None))
+                    item_ancora_id = int(itens_editados.iloc[0]["pedido_item_id"])
+                    solicitacao_ancora_id = int(cotacao_atual.get("solicitacao_id") or pedido_itens.loc[pedido_itens.id == item_ancora_id, "pedido_id"].iloc[0])
+                    cotacao_por_ordem = query("""
+                    select c.id
+                    from cotacoes c
+                    left join solicitacoes_compra s on s.id = c.solicitacao_id
+                    where coalesce(c.rubrica_id, s.rubrica_id)=%s and c.ordem=%s
+                    limit 1
+                    """, (rubrica_id, ordem))
+                    if len(cotacao_por_ordem):
+                        cotacao_salva = query("""
+                        update cotacoes
+                        set rubrica_id=%s,
+                            fornecedor=%s,
+                            cnpj_cpf=%s,
+                            telefone_email=%s,
+                            valor_unitario=%s,
+                            valor_total=%s,
+                            prazo_entrega=%s,
+                            forma_pagamento=%s,
+                            arquivo_url=%s,
+                            observacoes=%s
+                        where id=%s
+                        returning id
+                        """, (rubrica_id, fornecedor, cnpj, contato, 0, valor_total, prazo, "", arquivo_url_final, observacoes_gerais.strip() or None, int(cotacao_por_ordem.iloc[0]["id"])))
+                    else:
+                        cotacao_salva = query("""
+                        insert into cotacoes (solicitacao_id,rubrica_id,ordem,fornecedor,cnpj_cpf,telefone_email,valor_unitario,valor_total,prazo_entrega,forma_pagamento,arquivo_url,observacoes)
+                        values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        returning id
+                        """, (solicitacao_ancora_id, rubrica_id, ordem, fornecedor, cnpj, contato, 0, valor_total, prazo, "", arquivo_url_final, observacoes_gerais.strip() or None))
                     cotacao_id = int(cotacao_salva.iloc[0]["id"])
                     execute("delete from cotacao_itens where cotacao_id=%s", (cotacao_id,))
                     for _, item in itens_editados.iterrows():
@@ -1650,7 +1715,9 @@ elif menu == "cotacoes":
                         insert into cotacao_itens (cotacao_id, pedido_item_id, descricao_item, tipo_item, quantidade, valor_unitario, observacoes)
                         values (%s,%s,%s,%s,%s,%s,%s)
                         """, (cotacao_id, item["pedido_item_id"], str(item.get("Item") or "").strip() or None, str(item.get("Tipo") or "").strip() or None, Decimal(str(item["Quantidade"])), Decimal(str(item["Valor unitario numerico"])), str(item.get("Observacoes") or "").strip() or None))
-                    execute("update solicitacoes_compra set status='cotado' where id=%s", (sid,))
+                    solicitacoes_cotadas = pedido_itens[pedido_itens["id"].isin(itens_editados["pedido_item_id"])]["pedido_id"].dropna().unique().tolist()
+                    for solicitacao_cotada_id in solicitacoes_cotadas:
+                        execute("update solicitacoes_compra set status='cotado' where id=%s", (int(solicitacao_cotada_id),))
                     st.success("Cotacao salva com os itens vinculados.")
                     st.rerun()
 
