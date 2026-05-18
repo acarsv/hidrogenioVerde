@@ -994,11 +994,33 @@ def sincronizar_orcamento():
     update rubricas r
     set valor_utilizado = totais.valor_total
     from (
-        select s.rubrica_id, coalesce(sum(c.valor_compra), 0) as valor_total
+        select
+          coalesce(co.rubrica_id, s.rubrica_id) as rubrica_id,
+          coalesce(sum(c.valor_compra), 0) as valor_total
         from compras c
-        join solicitacoes_compra s on s.id = c.solicitacao_id
-        where s.status = 'finalizado'
-        group by s.rubrica_id
+        join cotacoes co on co.id = c.cotacao_vencedora_id
+        join solicitacoes_compra s on s.id = co.solicitacao_id
+        where (
+            select count(*)
+            from cotacao_itens ci
+            where ci.cotacao_id = co.id and ci.vencedor = true
+        ) > 0
+          and (
+            select count(*)
+            from cotacao_itens ci
+            join nota_fiscal_itens nfi on nfi.pedido_item_id = ci.pedido_item_id
+            left join patrimonio p on p.nota_fiscal_item_id = nfi.id
+            left join estoque_consumo e on e.nota_fiscal_item_id = nfi.id
+            left join atesto_servico a on a.nota_fiscal_item_id = nfi.id
+            where ci.cotacao_id = co.id
+              and ci.vencedor = true
+              and (p.id is not null or e.id is not null or a.id is not null)
+        ) = (
+            select count(*)
+            from cotacao_itens ci
+            where ci.cotacao_id = co.id and ci.vencedor = true
+        )
+        group by coalesce(co.rubrica_id, s.rubrica_id)
     ) totais
     where r.id = totais.rubrica_id
     """)
