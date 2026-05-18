@@ -1447,8 +1447,13 @@ elif menu == "cotacoes":
             st.warning("Esta solicitação ainda não tem itens do pedido. Recrie pela tela Nova exigência ou migre os itens antes de cotar.")
             st.stop()
 
-        st.markdown("### Dados fixos da cotacao")
-        ordem = st.selectbox("Cotacao no", [1,2,3], key=f"cotacao_ordem_{sid}")
+        st.markdown("### Abrir cotacao da empresa")
+        ordem = st.selectbox(
+            "Cotacao da empresa",
+            [1,2,3],
+            format_func=lambda valor: f"Cotacao {valor}",
+            key=f"cotacao_ordem_{sid}",
+        )
         cotacao_existente = query("""
         select id, fornecedor, cnpj_cpf, telefone_email, prazo_entrega, arquivo_url, observacoes
         from cotacoes
@@ -1473,6 +1478,7 @@ elif menu == "cotacoes":
             if campo_key not in st.session_state:
                 st.session_state[campo_key] = valor_inicial
 
+        st.markdown("### Dados fixos da cotacao")
         fornecedor = st.text_input("Fornecedor", key=fornecedor_key)
         cnpj = st.text_input("CNPJ/CPF", key=cnpj_key)
         contato = st.text_input("Telefone/E-mail", key=contato_key)
@@ -1575,7 +1581,7 @@ elif menu == "cotacoes":
             st.session_state[itens_state_key] = itens_atuais
             st.session_state[itens_editor_version_key] += 1
 
-        st.markdown("### Itens vinculados a esta cotacao")
+        st.markdown(f"### Itens da Cotacao {ordem}")
         cotacao_itens_editados = st.data_editor(
             pd.DataFrame(
                 st.session_state[itens_state_key],
@@ -1616,8 +1622,9 @@ elif menu == "cotacoes":
             resumo_itens_cotacao = cotacao_itens_editados[["Item", "Tipo", "Quantidade", "Valor unitario", "Valor total"]].copy()
             resumo_itens_cotacao["Valor unitario"] = resumo_itens_cotacao["Valor unitario"].apply(format_currency_brl)
             resumo_itens_cotacao["Valor total"] = resumo_itens_cotacao["Valor total"].apply(format_currency_brl)
-            st.markdown("### Resumo da cotacao")
             st.dataframe(resumo_itens_cotacao, use_container_width=True, hide_index=True)
+        else:
+            st.info("Esta cotacao ainda nao tem itens adicionados.")
         st.metric("Total da cotacao", format_currency_brl(valor_total))
 
         if st.button("Salvar cotacao completa"):
@@ -1665,9 +1672,23 @@ elif menu == "cotacoes":
                     ))
                 execute("update solicitacoes_compra set status='cotado' where id=%s", (sid,))
                 st.success("Proposta de cotacao salva com seus itens.")
-        cotacoes_salvas = query('select ordem, fornecedor, valor_total as "Valor total", prazo_entrega, arquivo_url as "Cotacao" from cotacoes where solicitacao_id=%s order by ordem', (sid,))
+        cotacoes_salvas = query("""
+        select
+          c.ordem,
+          c.fornecedor,
+          count(ci.id) as "Itens",
+          coalesce(sum(ci.valor_total), c.valor_total, 0) as "Valor total",
+          c.prazo_entrega,
+          c.arquivo_url as "Cotacao"
+        from cotacoes c
+        left join cotacao_itens ci on ci.cotacao_id = c.id
+        where c.solicitacao_id=%s
+        group by c.id, c.ordem, c.fornecedor, c.valor_total, c.prazo_entrega, c.arquivo_url
+        order by c.ordem
+        """, (sid,))
         if len(cotacoes_salvas):
             cotacoes_salvas["Valor total"] = cotacoes_salvas["Valor total"].apply(format_currency_brl)
+        st.markdown("### Cotacoes do grupo")
         st.dataframe(
             cotacoes_salvas,
             use_container_width=True,
