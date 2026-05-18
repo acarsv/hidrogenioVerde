@@ -1447,6 +1447,266 @@ elif menu == "cotacoes":
             st.warning("Esta solicitação ainda não tem itens do pedido. Recrie pela tela Nova exigência ou migre os itens antes de cotar.")
             st.stop()
 
+        st.markdown("### Cotacoes")
+        cotacoes_salvas_v2 = query("""
+        select
+          c.id,
+          c.ordem,
+          c.fornecedor,
+          c.cnpj_cpf,
+          c.telefone_email,
+          c.prazo_entrega,
+          c.arquivo_url,
+          c.observacoes,
+          count(ci.id) as total_itens,
+          coalesce(sum(ci.valor_total), c.valor_total, 0) as valor_total
+        from cotacoes c
+        left join cotacao_itens ci on ci.cotacao_id = c.id
+        where c.solicitacao_id=%s
+        group by c.id, c.ordem, c.fornecedor, c.cnpj_cpf, c.telefone_email, c.prazo_entrega, c.arquivo_url, c.observacoes, c.valor_total
+        order by c.ordem
+        """, (sid,))
+
+        def cotacao_v2_itens(cotacao_id):
+            return query("""
+            select
+              ci.id,
+              ci.pedido_item_id,
+              coalesce(ci.descricao_item, pi.descricao) as item,
+              coalesce(ci.tipo_item, pi.tipo_item) as tipo,
+              ci.quantidade,
+              ci.valor_unitario,
+              ci.valor_total,
+              ci.observacoes
+            from cotacao_itens ci
+            join pedido_itens pi on pi.id = ci.pedido_item_id
+            where ci.cotacao_id=%s
+            order by ci.created_at, ci.id
+            """, (cotacao_id,))
+
+        def cotacao_v2_formatar_itens(itens_df):
+            tabela = itens_df.copy()
+            if len(tabela):
+                tabela = tabela.rename(columns={
+                    "item": "Item",
+                    "tipo": "Tipo",
+                    "quantidade": "Quantidade",
+                    "valor_unitario": "Valor unitario",
+                    "valor_total": "Valor total",
+                    "observacoes": "Observacoes",
+                })
+                tabela["Valor unitario"] = tabela["Valor unitario"].apply(format_currency_brl)
+                tabela["Valor total"] = tabela["Valor total"].apply(format_currency_brl)
+                return tabela[["Item", "Tipo", "Quantidade", "Valor unitario", "Valor total", "Observacoes"]]
+            return pd.DataFrame(columns=["Item", "Tipo", "Quantidade", "Valor unitario", "Valor total", "Observacoes"])
+
+        def cotacao_v2_proxima_ordem():
+            usadas = set(cotacoes_salvas_v2["ordem"].astype(int).tolist()) if len(cotacoes_salvas_v2) else set()
+            for numero in [1, 2, 3]:
+                if numero not in usadas:
+                    return numero
+            return None
+
+        def cotacao_v2_carregar_estado(prefixo, itens_df):
+            st.session_state[f"{prefixo}_itens"] = []
+            for _, item in itens_df.iterrows():
+                st.session_state[f"{prefixo}_itens"].append({
+                    "linha_id": f"existente_{item['id']}",
+                    "pedido_item_id": item["pedido_item_id"],
+                    "Item": item["item"],
+                    "Tipo": item["tipo"],
+                    "Quantidade": float(item["quantidade"]),
+                    "Valor unitario": float(item["valor_unitario"]),
+                    "Observacoes": item["observacoes"] or "",
+                    "Remover": False,
+                })
+            st.session_state[f"{prefixo}_loaded"] = True
+            st.session_state[f"{prefixo}_editor_version"] = st.session_state.get(f"{prefixo}_editor_version", 0) + 1
+
+        def cotacao_v2_formulario(prefixo, ordem, cotacao_atual=None, itens_existentes=None):
+            cotacao_atual = cotacao_atual or {}
+            itens_existentes = itens_existentes if itens_existentes is not None else pd.DataFrame()
+            valores_iniciais = {
+                f"{prefixo}_fornecedor": str(cotacao_atual.get("fornecedor", "") or ""),
+                f"{prefixo}_cnpj": str(cotacao_atual.get("cnpj_cpf", "") or ""),
+                f"{prefixo}_contato": str(cotacao_atual.get("telefone_email", "") or ""),
+                f"{prefixo}_prazo": str(cotacao_atual.get("prazo_entrega", "") or ""),
+                f"{prefixo}_arquivo_url": str(cotacao_atual.get("arquivo_url", "") or ""),
+                f"{prefixo}_observacoes": str(cotacao_atual.get("observacoes", "") or ""),
+            }
+            for chave, valor in valores_iniciais.items():
+                if chave not in st.session_state:
+                    st.session_state[chave] = valor
+            if f"{prefixo}_editor_version" not in st.session_state:
+                st.session_state[f"{prefixo}_editor_version"] = 0
+            if not st.session_state.get(f"{prefixo}_loaded"):
+                cotacao_v2_carregar_estado(prefixo, itens_existentes)
+
+            st.markdown(f"### Cotacao {ordem} - dados da empresa")
+            fornecedor = st.text_input("Fornecedor", key=f"{prefixo}_fornecedor")
+            cnpj = st.text_input("CNPJ/CPF", key=f"{prefixo}_cnpj")
+            contato = st.text_input("Telefone/E-mail", key=f"{prefixo}_contato")
+            prazo = st.text_input("Prazo de entrega", key=f"{prefixo}_prazo")
+            arquivo = st.file_uploader("Arquivo da cotacao para o Google Drive", type=["pdf", "png", "jpg", "jpeg", "doc", "docx", "xls", "xlsx"], key=f"{prefixo}_arquivo")
+            arquivo_url = st.text_input("Link da cotacao no Google Drive", key=f"{prefixo}_arquivo_url")
+            if str(arquivo_url or "").strip():
+                st.link_button("Abrir cotacao no Google Drive", str(arquivo_url).strip())
+            observacoes_gerais = st.text_area("Observacoes gerais", key=f"{prefixo}_observacoes")
+
+            st.markdown("### Adicionar item")
+            item_id = st.selectbox("Item da solicitacao", pedido_itens["id"].tolist(), format_func=lambda valor: pedido_itens.loc[pedido_itens.id == valor, "descricao"].iloc[0], key=f"{prefixo}_item")
+            item_base = pedido_itens[pedido_itens["id"] == item_id].iloc[0]
+            descricao_item = st.text_input("Descricao do produto", value=str(item_base["descricao"]), key=f"{prefixo}_desc_{item_id}")
+            tipo_item = st.text_input("Tipo", value=str(item_base["tipo_item"]), key=f"{prefixo}_tipo_{item_id}")
+            col_qtd, col_valor = st.columns(2)
+            with col_qtd:
+                quantidade = st.number_input("Quantidade", min_value=0.01, value=float(item_base["quantidade"]), format="%.2f", key=f"{prefixo}_qtd_{item_id}")
+            with col_valor:
+                valor_unitario = st.number_input("Valor unitario", min_value=0.0, value=float(item_base["valor_unitario"] or 0), format="%.2f", key=f"{prefixo}_valor_{item_id}")
+            observacao_item = st.text_input("Observacao do item", key=f"{prefixo}_obs_item_{item_id}")
+            if st.button("Adicionar item", key=f"{prefixo}_adicionar"):
+                itens = list(st.session_state[f"{prefixo}_itens"])
+                itens.append({
+                    "linha_id": f"novo_{len(itens) + 1}_{item_id}",
+                    "pedido_item_id": item_id,
+                    "Item": descricao_item.strip() or item_base["descricao"],
+                    "Tipo": tipo_item.strip() or item_base["tipo_item"],
+                    "Quantidade": float(quantidade),
+                    "Valor unitario": float(valor_unitario),
+                    "Observacoes": observacao_item.strip(),
+                    "Remover": False,
+                })
+                st.session_state[f"{prefixo}_itens"] = itens
+                st.session_state[f"{prefixo}_editor_version"] += 1
+
+            st.markdown("### Itens da cotacao")
+            itens_editados = st.data_editor(
+                pd.DataFrame(st.session_state[f"{prefixo}_itens"], columns=["linha_id", "pedido_item_id", "Item", "Tipo", "Quantidade", "Valor unitario", "Observacoes", "Remover"]),
+                use_container_width=True,
+                hide_index=True,
+                disabled=["linha_id", "pedido_item_id"],
+                column_config={
+                    "linha_id": None,
+                    "pedido_item_id": None,
+                    "Quantidade": st.column_config.NumberColumn("Quantidade", min_value=0.01, format="%.2f"),
+                    "Valor unitario": st.column_config.NumberColumn("Valor unitario", min_value=0.0, format="R$ %.2f"),
+                    "Remover": st.column_config.CheckboxColumn("Remover"),
+                },
+                key=f"{prefixo}_editor_{st.session_state[f'{prefixo}_editor_version']}",
+            )
+            if len(itens_editados) and st.button("Remover item marcado", key=f"{prefixo}_remover"):
+                itens_editados = itens_editados[itens_editados["Remover"] != True].copy()
+                st.session_state[f"{prefixo}_itens"] = itens_editados.to_dict("records")
+                st.session_state[f"{prefixo}_editor_version"] += 1
+            if "Quantidade" not in itens_editados.columns:
+                itens_editados = pd.DataFrame(columns=["linha_id", "pedido_item_id", "Item", "Tipo", "Quantidade", "Valor unitario", "Observacoes", "Remover"])
+            st.session_state[f"{prefixo}_itens"] = itens_editados.to_dict("records")
+            itens_editados["Quantidade"] = pd.to_numeric(itens_editados["Quantidade"], errors="coerce").fillna(0)
+            itens_editados["Valor unitario numerico"] = pd.to_numeric(itens_editados["Valor unitario"], errors="coerce").fillna(0)
+            itens_editados = itens_editados[itens_editados["Remover"] != True].copy()
+            itens_editados["Valor total"] = itens_editados["Quantidade"].apply(lambda valor: Decimal(str(valor))) * itens_editados["Valor unitario numerico"].apply(lambda valor: Decimal(str(valor)))
+            valor_total = Decimal(str(itens_editados["Valor total"].sum())) if len(itens_editados) else Decimal("0")
+            if len(itens_editados):
+                resumo = itens_editados[["Item", "Tipo", "Quantidade", "Valor unitario", "Valor total", "Observacoes"]].copy()
+                resumo["Valor unitario"] = resumo["Valor unitario"].apply(format_currency_brl)
+                resumo["Valor total"] = resumo["Valor total"].apply(format_currency_brl)
+                st.dataframe(resumo, use_container_width=True, hide_index=True)
+            else:
+                st.info("Nenhum item adicionado.")
+            st.metric("Valor total da cotacao", format_currency_brl(valor_total))
+
+            if st.button("Salvar cotacao", key=f"{prefixo}_salvar"):
+                if not fornecedor.strip():
+                    st.error("Informe o fornecedor.")
+                elif len(itens_editados) == 0:
+                    st.error("Adicione pelo menos um item.")
+                elif (itens_editados["Quantidade"] <= 0).any():
+                    st.error("Todos os itens devem ter quantidade maior que zero.")
+                elif (itens_editados["Valor unitario numerico"] < 0).any():
+                    st.error("Todos os valores unitarios devem ser maiores ou iguais a zero.")
+                elif arquivo is None and not str(arquivo_url or "").strip():
+                    st.error("Anexe o arquivo da cotacao ou informe o link no Google Drive.")
+                else:
+                    arquivo_url_final = str(arquivo_url or "").strip()
+                    if arquivo is not None and not arquivo_url_final:
+                        try:
+                            arquivo_url_final = upload_cotacao_google_drive(arquivo, sid, ordem)
+                        except RuntimeError as exc:
+                            st.error(str(exc))
+                            st.stop()
+                    cotacao_salva = query("""
+                    insert into cotacoes (solicitacao_id,ordem,fornecedor,cnpj_cpf,telefone_email,valor_unitario,valor_total,prazo_entrega,forma_pagamento,arquivo_url,observacoes)
+                    values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    on conflict (solicitacao_id,ordem) do update set fornecedor=excluded.fornecedor, cnpj_cpf=excluded.cnpj_cpf,
+                    telefone_email=excluded.telefone_email, valor_unitario=excluded.valor_unitario, valor_total=excluded.valor_total,
+                    prazo_entrega=excluded.prazo_entrega, forma_pagamento=excluded.forma_pagamento, arquivo_url=excluded.arquivo_url,
+                    observacoes=excluded.observacoes
+                    returning id
+                    """, (sid, ordem, fornecedor, cnpj, contato, 0, valor_total, prazo, "", arquivo_url_final, observacoes_gerais.strip() or None))
+                    cotacao_id = int(cotacao_salva.iloc[0]["id"])
+                    execute("delete from cotacao_itens where cotacao_id=%s", (cotacao_id,))
+                    for _, item in itens_editados.iterrows():
+                        execute("""
+                        insert into cotacao_itens (cotacao_id, pedido_item_id, descricao_item, tipo_item, quantidade, valor_unitario, observacoes)
+                        values (%s,%s,%s,%s,%s,%s,%s)
+                        """, (cotacao_id, item["pedido_item_id"], str(item.get("Item") or "").strip() or None, str(item.get("Tipo") or "").strip() or None, Decimal(str(item["Quantidade"])), Decimal(str(item["Valor unitario numerico"])), str(item.get("Observacoes") or "").strip() or None))
+                    execute("update solicitacoes_compra set status='cotado' where id=%s", (sid,))
+                    st.success("Cotacao salva com os itens vinculados.")
+                    st.rerun()
+
+        modo_opcoes = ["Adicionar nova cotacao"]
+        if len(cotacoes_salvas_v2):
+            modo_opcoes.insert(0, "Escolher cotacao cadastrada")
+        modo = st.radio("Acao", modo_opcoes, horizontal=True, key=f"cotacao_v2_modo_{sid}")
+
+        if modo == "Escolher cotacao cadastrada":
+            cotacao_id = st.selectbox(
+                "Cotacao cadastrada",
+                cotacoes_salvas_v2["id"].tolist(),
+                format_func=lambda valor: f"Cotacao {int(cotacoes_salvas_v2.loc[cotacoes_salvas_v2.id == valor, 'ordem'].iloc[0])} - {cotacoes_salvas_v2.loc[cotacoes_salvas_v2.id == valor, 'fornecedor'].iloc[0]} - {format_currency_brl(cotacoes_salvas_v2.loc[cotacoes_salvas_v2.id == valor, 'valor_total'].iloc[0])}",
+                key=f"cotacao_v2_cadastrada_{sid}",
+            )
+            cotacao_row = cotacoes_salvas_v2[cotacoes_salvas_v2["id"] == cotacao_id].iloc[0]
+            itens_cadastrados = cotacao_v2_itens(cotacao_id)
+            if st.session_state.get(f"cotacao_v2_editando_{sid}") == int(cotacao_id):
+                cotacao_v2_formulario(f"cotacao_v2_editar_{sid}_{cotacao_id}", int(cotacao_row["ordem"]), cotacao_row.to_dict(), itens_cadastrados)
+            else:
+                st.markdown(f"### Cotacao {int(cotacao_row['ordem'])}")
+                dados_empresa = pd.DataFrame([
+                    ("Fornecedor", cotacao_row["fornecedor"]),
+                    ("CNPJ/CPF", cotacao_row["cnpj_cpf"]),
+                    ("Telefone/E-mail", cotacao_row["telefone_email"]),
+                    ("Prazo de entrega", cotacao_row["prazo_entrega"]),
+                    ("Link Google Drive", cotacao_row["arquivo_url"]),
+                    ("Observacoes gerais", cotacao_row["observacoes"]),
+                ], columns=["Campo", "Valor"])
+                st.dataframe(dados_empresa, use_container_width=True, hide_index=True)
+                if str(cotacao_row["arquivo_url"] or "").strip():
+                    st.link_button("Abrir cotacao no Google Drive", str(cotacao_row["arquivo_url"]).strip())
+                st.markdown("### Itens da cotacao")
+                st.dataframe(cotacao_v2_formatar_itens(itens_cadastrados), use_container_width=True, hide_index=True)
+                st.metric("Valor final da cotacao", format_currency_brl(cotacao_row["valor_total"]))
+                if st.button("Editar cotacao", key=f"cotacao_v2_editar_botao_{sid}_{cotacao_id}"):
+                    st.session_state[f"cotacao_v2_editando_{sid}"] = int(cotacao_id)
+                    cotacao_v2_carregar_estado(f"cotacao_v2_editar_{sid}_{cotacao_id}", itens_cadastrados)
+                    st.rerun()
+        else:
+            usadas = set(cotacoes_salvas_v2["ordem"].astype(int).tolist()) if len(cotacoes_salvas_v2) else set()
+            nova_ordem = next((numero for numero in [1, 2, 3] if numero not in usadas), None)
+            if nova_ordem is None:
+                st.warning("Ja existem 3 cotacoes cadastradas. Escolha uma cotacao cadastrada e clique em Editar cotacao.")
+            else:
+                cotacao_v2_formulario(f"cotacao_v2_nova_{sid}_{nova_ordem}", nova_ordem)
+
+        if len(cotacoes_salvas_v2):
+            resumo_cotacoes = cotacoes_salvas_v2[["ordem", "fornecedor", "total_itens", "valor_total", "prazo_entrega", "arquivo_url"]].copy()
+            resumo_cotacoes = resumo_cotacoes.rename(columns={"ordem": "Cotacao", "fornecedor": "Fornecedor", "total_itens": "Itens", "valor_total": "Valor total", "prazo_entrega": "Prazo", "arquivo_url": "Link"})
+            resumo_cotacoes["Valor total"] = resumo_cotacoes["Valor total"].apply(format_currency_brl)
+            st.markdown("### Cotacoes cadastradas")
+            st.dataframe(resumo_cotacoes, use_container_width=True, hide_index=True, column_config={"Link": st.column_config.LinkColumn("Link")})
+
+        st.stop()
+
         st.markdown("### Abrir cotacao da empresa")
         ordem = st.selectbox(
             "Cotacao da empresa",
