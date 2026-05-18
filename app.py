@@ -2183,7 +2183,7 @@ elif menu == "compra_nota":
             solicitacoes_compra_vencedora = query("""
             select distinct pi.pedido_id
             from pedido_itens pi
-            where pi.id = any(%s)
+            where pi.id = any(%s::uuid[])
             """, (itens_cotacao_selecionada["pedido_item_id"].tolist(),))
             for solicitacao_compra_id in solicitacoes_compra_vencedora["pedido_id"].dropna().tolist():
                 execute("update solicitacoes_compra set status='aguardando_nota' where id=%s", (int(solicitacao_compra_id),))
@@ -2355,14 +2355,14 @@ elif menu == "compra_nota":
                     total_real_nf = query("""
                     select coalesce(sum(nfi.valor_total), 0) as valor_total_real
                     from nota_fiscal_itens nfi
-                    where nfi.pedido_item_id = any(%s)
+                    where nfi.pedido_item_id = any(%s::uuid[])
                     """, (itens_vencedores["pedido_item_id"].tolist(),))
                     valor_total_real = Decimal(str(total_real_nf.iloc[0]["valor_total_real"])) if len(total_real_nf) else Decimal("0")
                     execute("update compras set valor_compra=%s where id=%s", (valor_total_real, compra_id))
                     solicitacoes_finalizadas = query("""
                     select distinct pedido_id
                     from pedido_itens
-                    where id = any(%s)
+                    where id = any(%s::uuid[])
                     """, (itens_vencedores["pedido_item_id"].tolist(),))
                     for solicitacao_finalizada_id in solicitacoes_finalizadas["pedido_id"].dropna().tolist():
                         execute("update solicitacoes_compra set status='finalizado' where id=%s", (int(solicitacao_finalizada_id),))
