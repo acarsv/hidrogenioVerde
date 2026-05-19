@@ -1743,14 +1743,8 @@ elif menu == "cotacoes":
                             st.stop()
                     item_ancora_id = itens_editados.iloc[0]["pedido_item_id"]
                     solicitacao_ancora_id = int(cotacao_atual.get("solicitacao_id") or pedido_itens.loc[pedido_itens.id == item_ancora_id, "pedido_id"].iloc[0])
-                    cotacao_por_ordem = query("""
-                    select c.id
-                    from cotacoes c
-                    left join solicitacoes_compra s on s.id = c.solicitacao_id
-                    where coalesce(c.rubrica_id, s.rubrica_id)=%s and c.ordem=%s
-                    limit 1
-                    """, (rubrica_id, ordem))
-                    if len(cotacao_por_ordem):
+                    cotacao_id_atual = cotacao_atual.get("id")
+                    if cotacao_id_atual:
                         cotacao_salva = query("""
                         update cotacoes
                         set rubrica_id=%s,
@@ -1765,13 +1759,37 @@ elif menu == "cotacoes":
                             observacoes=%s
                         where id=%s
                         returning id
-                        """, (rubrica_id, fornecedor, cnpj, contato, 0, valor_total, prazo, "", arquivo_url_final, observacoes_gerais.strip() or None, int(cotacao_por_ordem.iloc[0]["id"])))
+                        """, (rubrica_id, fornecedor, cnpj, contato, 0, valor_total, prazo, "", arquivo_url_final, observacoes_gerais.strip() or None, int(cotacao_id_atual)))
                     else:
-                        cotacao_salva = query("""
-                        insert into cotacoes (solicitacao_id,rubrica_id,ordem,fornecedor,cnpj_cpf,telefone_email,valor_unitario,valor_total,prazo_entrega,forma_pagamento,arquivo_url,observacoes)
-                        values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                        returning id
-                        """, (solicitacao_ancora_id, rubrica_id, ordem, fornecedor, cnpj, contato, 0, valor_total, prazo, "", arquivo_url_final, observacoes_gerais.strip() or None))
+                        cotacao_por_ordem = query("""
+                        select c.id
+                        from cotacoes c
+                        left join solicitacoes_compra s on s.id = c.solicitacao_id
+                        where coalesce(c.rubrica_id, s.rubrica_id)=%s and c.ordem=%s
+                        limit 1
+                        """, (rubrica_id, ordem))
+                        if len(cotacao_por_ordem):
+                            cotacao_salva = query("""
+                            update cotacoes
+                            set rubrica_id=%s,
+                                fornecedor=%s,
+                                cnpj_cpf=%s,
+                                telefone_email=%s,
+                                valor_unitario=%s,
+                                valor_total=%s,
+                                prazo_entrega=%s,
+                                forma_pagamento=%s,
+                                arquivo_url=%s,
+                                observacoes=%s
+                            where id=%s
+                            returning id
+                            """, (rubrica_id, fornecedor, cnpj, contato, 0, valor_total, prazo, "", arquivo_url_final, observacoes_gerais.strip() or None, int(cotacao_por_ordem.iloc[0]["id"])))
+                        else:
+                            cotacao_salva = query("""
+                            insert into cotacoes (solicitacao_id,rubrica_id,ordem,fornecedor,cnpj_cpf,telefone_email,valor_unitario,valor_total,prazo_entrega,forma_pagamento,arquivo_url,observacoes)
+                            values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                            returning id
+                            """, (solicitacao_ancora_id, rubrica_id, ordem, fornecedor, cnpj, contato, 0, valor_total, prazo, "", arquivo_url_final, observacoes_gerais.strip() or None))
                     cotacao_id = int(cotacao_salva.iloc[0]["id"])
                     execute("delete from cotacao_itens where cotacao_id=%s", (cotacao_id,))
                     for _, item in itens_editados.iterrows():
