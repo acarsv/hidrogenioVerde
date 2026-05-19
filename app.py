@@ -118,6 +118,29 @@ def escapar_drive_query(valor):
     return str(valor).replace("\\", "\\\\").replace("'", "\\'")
 
 
+def carregar_service_account_info(service_account_json):
+    if not isinstance(service_account_json, str):
+        return dict(service_account_json)
+    try:
+        return json.loads(service_account_json)
+    except json.JSONDecodeError:
+        texto = service_account_json.strip()
+        match = re.search(r'("private_key"\s*:\s*")(.*?)(",\s*"client_email")', texto, flags=re.DOTALL)
+        if match:
+            chave = match.group(2).replace("\\n", "\n")
+            chave = chave.replace("\r\n", "\n").replace("\r", "\n")
+            chave = chave.replace("\n", "\\n")
+            texto = texto[:match.start(2)] + chave + texto[match.end(2):]
+            try:
+                return json.loads(texto)
+            except json.JSONDecodeError:
+                pass
+        raise RuntimeError(
+            "GOOGLE_SERVICE_ACCOUNT_JSON está mal formatado. Cole o JSON completo como bloco '''...''' "
+            "no Streamlit Secrets e mantenha as quebras da private_key como \\n."
+        )
+
+
 def upload_cotacao_google_drive(uploaded_file, solicitacao_id, ordem, rubrica_id=None, fornecedor=None, pasta_url=None):
     folder_id = config_value("GOOGLE_DRIVE_COTACOES_FOLDER_ID", "GOOGLE_DRIVE_FOLDER_ID")
     service_account_json = config_value("GOOGLE_SERVICE_ACCOUNT_JSON")
@@ -139,10 +162,8 @@ def upload_cotacao_google_drive(uploaded_file, solicitacao_id, ordem, rubrica_id
 
     scopes = ["https://www.googleapis.com/auth/drive.file"]
     if service_account_json:
-        if not isinstance(service_account_json, str):
-            service_account_json = json.dumps(dict(service_account_json))
         credentials = service_account.Credentials.from_service_account_info(
-            json.loads(service_account_json),
+            carregar_service_account_info(service_account_json),
             scopes=scopes,
         )
     else:
