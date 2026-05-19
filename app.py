@@ -157,10 +157,12 @@ def descrever_erro_google_drive(exc):
         pass
 
     if status in (401, 403):
+        detalhe = f" Detalhe Google: {motivo or mensagem}." if (motivo or mensagem) else ""
         return (
             "Google Drive recusou o upload por falta de permissão. "
             "Compartilhe a pasta GOOGLE_DRIVE_COTACOES_FOLDER_ID com o e-mail da service account como Editor "
             "e confirme se a API Google Drive está habilitada no projeto."
+            f"{detalhe}"
         )
     if status == 404:
         return (
@@ -212,18 +214,23 @@ def upload_cotacao_google_drive(uploaded_file, solicitacao_id, ordem, rubrica_id
         cotacao_folder_id = None
 
         if pasta_link_id:
-            pasta_link = service.files().get(
-                fileId=pasta_link_id,
-                fields="id, name, mimeType",
-                supportsAllDrives=True,
-            ).execute()
-            if (
-                pasta_link.get("mimeType") == "application/vnd.google-apps.folder"
-                and str(pasta_link.get("name", "")).startswith(f"rubrica_{rubrica_id or solicitacao_id}_cotacao_{ordem}_")
-            ):
-                cotacao_folder_id = pasta_link_id
-            elif pasta_link.get("mimeType") == "application/vnd.google-apps.folder":
-                parent_folder_id = pasta_link_id
+            try:
+                pasta_link = service.files().get(
+                    fileId=pasta_link_id,
+                    fields="id, name, mimeType",
+                    supportsAllDrives=True,
+                ).execute()
+                if (
+                    pasta_link.get("mimeType") == "application/vnd.google-apps.folder"
+                    and str(pasta_link.get("name", "")).startswith(f"rubrica_{rubrica_id or solicitacao_id}_cotacao_{ordem}_")
+                ):
+                    cotacao_folder_id = pasta_link_id
+                elif pasta_link.get("mimeType") == "application/vnd.google-apps.folder":
+                    parent_folder_id = pasta_link_id
+            except HttpError:
+                # Link antigo/inacessível na cotação não deve impedir novo upload.
+                parent_folder_id = folder_id
+                cotacao_folder_id = None
 
         if not cotacao_folder_id:
             existentes = service.files().list(
