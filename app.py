@@ -1,6 +1,7 @@
 import os
 import mimetypes
 import re
+import json
 from io import BytesIO
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -78,6 +79,19 @@ def execute(sql, params=None):
     finally:
         conn.close()
 
+def config_value(nome, alternativa=None):
+    valor = os.environ.get(nome)
+    if valor:
+        return valor
+    try:
+        if nome in st.secrets:
+            return st.secrets[nome]
+        if alternativa and alternativa in st.secrets:
+            return st.secrets[alternativa]
+    except Exception:
+        pass
+    return os.environ.get(alternativa) if alternativa else None
+
 def google_drive_folder_url(folder_id):
     return f"https://drive.google.com/drive/folders/{folder_id}"
 
@@ -105,14 +119,14 @@ def escapar_drive_query(valor):
 
 
 def upload_cotacao_google_drive(uploaded_file, solicitacao_id, ordem, rubrica_id=None, fornecedor=None, pasta_url=None):
-    folder_id = os.environ.get("GOOGLE_DRIVE_COTACOES_FOLDER_ID") or os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
-    service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-    service_account_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    folder_id = config_value("GOOGLE_DRIVE_COTACOES_FOLDER_ID", "GOOGLE_DRIVE_FOLDER_ID")
+    service_account_json = config_value("GOOGLE_SERVICE_ACCOUNT_JSON")
+    service_account_file = config_value("GOOGLE_APPLICATION_CREDENTIALS")
 
     if not folder_id:
-        raise RuntimeError("GOOGLE_DRIVE_COTACOES_FOLDER_ID nao foi definido no .env.")
+        raise RuntimeError("GOOGLE_DRIVE_COTACOES_FOLDER_ID não foi definido no Streamlit Secrets ou no .env.")
     if not service_account_json and not service_account_file:
-        raise RuntimeError("Defina GOOGLE_SERVICE_ACCOUNT_JSON ou GOOGLE_APPLICATION_CREDENTIALS no .env.")
+        raise RuntimeError("Defina GOOGLE_SERVICE_ACCOUNT_JSON ou GOOGLE_APPLICATION_CREDENTIALS no Streamlit Secrets ou no .env.")
 
     try:
         from google.oauth2 import service_account
@@ -125,7 +139,8 @@ def upload_cotacao_google_drive(uploaded_file, solicitacao_id, ordem, rubrica_id
 
     scopes = ["https://www.googleapis.com/auth/drive.file"]
     if service_account_json:
-        import json
+        if not isinstance(service_account_json, str):
+            service_account_json = json.dumps(dict(service_account_json))
         credentials = service_account.Credentials.from_service_account_info(
             json.loads(service_account_json),
             scopes=scopes,
@@ -191,7 +206,8 @@ def upload_cotacao_google_drive(uploaded_file, solicitacao_id, ordem, rubrica_id
 
     filename = uploaded_file.name
     content_type = uploaded_file.type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
-    media = MediaIoBaseUpload(BytesIO(uploaded_file.getvalue()), mimetype=content_type, resumable=False)
+    conteudo = uploaded_file.getvalue()
+    media = MediaIoBaseUpload(BytesIO(conteudo), mimetype=content_type, resumable=False)
     metadata = {
         "name": f"solicitacao_{solicitacao_id}_cotacao_{ordem}_{filename}",
         "parents": [cotacao_folder_id],
@@ -204,7 +220,15 @@ def upload_cotacao_google_drive(uploaded_file, solicitacao_id, ordem, rubrica_id
     ).execute()
     if cotacao_folder_id not in criado.get("parents", []):
         raise RuntimeError("O arquivo foi enviado, mas o Google Drive não confirmou vínculo com a pasta da cotação.")
-    return pasta_confirmada.get("webViewLink") or google_drive_folder_url(cotacao_folder_id)
+    return {
+        "folder_id": cotacao_folder_id,
+        "folder_link": pasta_confirmada.get("webViewLink") or google_drive_folder_url(cotacao_folder_id),
+        "file_id": criado.get("id"),
+        "file_link": criado.get("webViewLink"),
+        "nome_arquivo": filename,
+        "mime_type": content_type,
+        "tamanho_bytes": getattr(uploaded_file, "size", None) or len(conteudo),
+    }
 
 def has_column(table_name: str, column_name: str) -> bool:
     df = query("""
@@ -216,6 +240,34 @@ def has_column(table_name: str, column_name: str) -> bool:
     limit 1
     """, (table_name, column_name))
     return len(df) == 1
+
+def cotacao_arquivos_df(cotacao_id):
+    if not cotacao_id:
+        return pd.DataFrame()
+    return query("""
+    select id, nome_arquivo, google_drive_link, mime_type, tamanho_bytes, criado_em
+    from cotacao_arquivos
+    where cotacao_id=%s
+    order by criado_em desc, id desc
+    """, (int(cotacao_id),))
+
+def exibir_arquivos_cotacao(cotacao_id):
+    arquivos = cotacao_arquivos_df(cotacao_id)
+    if len(arquivos) == 0:
+        return
+    tabela = arquivos[["nome_arquivo", "google_drive_link", "criado_em"]].copy()
+    tabela = tabela.rename(columns={
+        "nome_arquivo": "Arquivo",
+        "google_drive_link": "Link",
+        "criado_em": "Enviado em",
+    })
+    st.markdown("### Arquivos vinculados à cotação")
+    st.dataframe(
+        tabela,
+        use_container_width=True,
+        hide_index=True,
+        column_config={"Link": st.column_config.LinkColumn("Abrir arquivo")},
+    )
 
 def ensure_financial_governance_schema():
     if not has_column("cotacoes", "arquivo_url"):
@@ -234,6 +286,18 @@ def ensure_financial_governance_schema():
         execute("alter table cotacao_itens add column descricao_item text")
     if not has_column("cotacao_itens", "tipo_item"):
         execute("alter table cotacao_itens add column tipo_item text")
+    execute("""
+    create table if not exists cotacao_arquivos (
+      id bigserial primary key,
+      cotacao_id bigint not null references cotacoes(id) on delete cascade,
+      google_drive_file_id text not null,
+      google_drive_link text,
+      nome_arquivo text not null,
+      mime_type text,
+      tamanho_bytes bigint,
+      criado_em timestamptz not null default now()
+    )
+    """)
     if not has_column("rubricas", "valor_minimo_operacional"):
         execute("alter table rubricas add column valor_minimo_operacional numeric(14,2) not null default 0")
     if not has_column("rubricas", "reserva_tecnica_percentual"):
@@ -1673,6 +1737,7 @@ elif menu == "cotacoes":
             if str(arquivo_url or "").strip():
                 st.link_button("Abrir pasta da cotação no Google Drive", str(arquivo_url).strip())
             observacoes_gerais = st.text_area("Observações gerais", key=f"{prefixo}_observacoes")
+            exibir_arquivos_cotacao(cotacao_atual.get("id"))
 
             st.markdown("### Adicionar item à cotação")
             item_id = st.selectbox(
@@ -1759,9 +1824,10 @@ elif menu == "cotacoes":
                     st.error("Anexe o arquivo da cotação ou informe o link no Google Drive.")
                 else:
                     arquivo_url_final = str(arquivo_url or "").strip()
+                    upload_resultado = None
                     if arquivo is not None:
                         try:
-                            arquivo_url_final = upload_cotacao_google_drive(
+                            upload_resultado = upload_cotacao_google_drive(
                                 arquivo,
                                 sid,
                                 ordem,
@@ -1769,6 +1835,7 @@ elif menu == "cotacoes":
                                 fornecedor=fornecedor,
                                 pasta_url=arquivo_url_final,
                             )
+                            arquivo_url_final = upload_resultado["folder_link"]
                         except RuntimeError as exc:
                             st.error(str(exc))
                             st.stop()
@@ -1822,6 +1889,25 @@ elif menu == "cotacoes":
                             returning id
                             """, (solicitacao_ancora_id, rubrica_id, ordem, fornecedor, cnpj, contato, 0, valor_total, prazo, "", arquivo_url_final, observacoes_gerais.strip() or None))
                     cotacao_id = int(cotacao_salva.iloc[0]["id"])
+                    if upload_resultado:
+                        execute("""
+                        insert into cotacao_arquivos (
+                            cotacao_id,
+                            google_drive_file_id,
+                            google_drive_link,
+                            nome_arquivo,
+                            mime_type,
+                            tamanho_bytes
+                        )
+                        values (%s,%s,%s,%s,%s,%s)
+                        """, (
+                            cotacao_id,
+                            upload_resultado["file_id"],
+                            upload_resultado["file_link"],
+                            upload_resultado["nome_arquivo"],
+                            upload_resultado["mime_type"],
+                            upload_resultado["tamanho_bytes"],
+                        ))
                     execute("delete from cotacao_itens where cotacao_id=%s", (cotacao_id,))
                     for _, item in itens_editados.iterrows():
                         execute("""
@@ -1864,6 +1950,7 @@ elif menu == "cotacoes":
                 st.dataframe(dados_empresa, use_container_width=True, hide_index=True)
                 if str(cotacao_row["arquivo_url"] or "").strip():
                     st.link_button("Abrir pasta da cotação no Google Drive", str(cotacao_row["arquivo_url"]).strip())
+                exibir_arquivos_cotacao(cotacao_id)
                 st.markdown("### Itens da cotação")
                 st.dataframe(cotacao_v2_formatar_itens(itens_cadastrados), use_container_width=True, hide_index=True)
                 st.metric("Valor final da cotação", format_currency_brl(cotacao_row["valor_total"]))
