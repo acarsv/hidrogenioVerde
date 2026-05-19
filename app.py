@@ -1783,23 +1783,24 @@ elif menu == "cotacoes":
                     for solicitacao_cotada_id in solicitacoes_cotadas:
                         execute("update solicitacoes_compra set status='cotado' where id=%s", (int(solicitacao_cotada_id),))
                     st.success("Cotação salva com os itens vinculados.")
+                    st.session_state[f"cotacao_v2_editando_{sid}"] = None
                     st.rerun()
 
         modo_opcoes = ["Adicionar nova cotação"]
         if len(cotacoes_salvas_v2):
-            modo_opcoes.insert(0, "Escolher cotação cadastrada")
+            modo_opcoes = ["Escolher cotação cadastrada", "Editar cotação cadastrada", "Adicionar nova cotação"]
         modo = st.radio("Ação", modo_opcoes, horizontal=True, key=f"cotacao_v2_modo_{sid}")
 
-        if modo == "Escolher cotação cadastrada":
+        if modo in ["Escolher cotação cadastrada", "Editar cotação cadastrada"]:
             cotacao_id = st.selectbox(
-                "Cotação cadastrada",
+                "Cotação cadastrada para editar" if modo == "Editar cotação cadastrada" else "Cotação cadastrada",
                 cotacoes_salvas_v2["id"].tolist(),
                 format_func=lambda valor: f"Cotação {int(cotacoes_salvas_v2.loc[cotacoes_salvas_v2.id == valor, 'ordem'].iloc[0])} - {cotacoes_salvas_v2.loc[cotacoes_salvas_v2.id == valor, 'fornecedor'].iloc[0]} - {format_currency_brl(cotacoes_salvas_v2.loc[cotacoes_salvas_v2.id == valor, 'valor_total'].iloc[0])}",
-                key=f"cotacao_v2_cadastrada_{sid}",
+                key=f"cotacao_v2_cadastrada_{sid}_{modo}",
             )
             cotacao_row = cotacoes_salvas_v2[cotacoes_salvas_v2["id"] == cotacao_id].iloc[0]
             itens_cadastrados = cotacao_v2_itens(cotacao_id)
-            if st.session_state.get(f"cotacao_v2_editando_{sid}") == int(cotacao_id):
+            if modo == "Editar cotação cadastrada" or st.session_state.get(f"cotacao_v2_editando_{sid}") == int(cotacao_id):
                 cotacao_v2_formulario(f"cotacao_v2_editar_{sid}_{cotacao_id}", int(cotacao_row["ordem"]), cotacao_row.to_dict(), itens_cadastrados)
             else:
                 st.markdown(f"### Cotação {int(cotacao_row['ordem'])}")
