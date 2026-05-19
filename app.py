@@ -100,6 +100,10 @@ def nome_seguro_drive(valor):
     return texto[:120] or "sem_fornecedor"
 
 
+def escapar_drive_query(valor):
+    return str(valor).replace("\\", "\\\\").replace("'", "\\'")
+
+
 def upload_cotacao_google_drive(uploaded_file, solicitacao_id, ordem, rubrica_id=None, fornecedor=None, pasta_url=None):
     folder_id = os.environ.get("GOOGLE_DRIVE_COTACOES_FOLDER_ID") or os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
     service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
@@ -133,21 +137,57 @@ def upload_cotacao_google_drive(uploaded_file, solicitacao_id, ordem, rubrica_id
         )
 
     service = build("drive", "v3", credentials=credentials, cache_discovery=False)
-    cotacao_folder_id = extrair_google_drive_folder_id(pasta_url)
-    if cotacao_folder_id == folder_id:
-        cotacao_folder_id = None
-    if not cotacao_folder_id:
-        pasta_nome = f"rubrica_{rubrica_id or solicitacao_id}_cotacao_{ordem}_{nome_seguro_drive(fornecedor)}"
-        pasta = service.files().create(
-            body={
-                "name": pasta_nome,
-                "mimeType": "application/vnd.google-apps.folder",
-                "parents": [folder_id],
-            },
-            fields="id",
+    pasta_nome = f"rubrica_{rubrica_id or solicitacao_id}_cotacao_{ordem}_{nome_seguro_drive(fornecedor)}"
+    pasta_link_id = extrair_google_drive_folder_id(pasta_url)
+    parent_folder_id = folder_id
+    cotacao_folder_id = None
+
+    if pasta_link_id:
+        pasta_link = service.files().get(
+            fileId=pasta_link_id,
+            fields="id, name, mimeType",
             supportsAllDrives=True,
         ).execute()
-        cotacao_folder_id = pasta["id"]
+        if (
+            pasta_link.get("mimeType") == "application/vnd.google-apps.folder"
+            and str(pasta_link.get("name", "")).startswith(f"rubrica_{rubrica_id or solicitacao_id}_cotacao_{ordem}_")
+        ):
+            cotacao_folder_id = pasta_link_id
+        elif pasta_link.get("mimeType") == "application/vnd.google-apps.folder":
+            parent_folder_id = pasta_link_id
+
+    if not cotacao_folder_id:
+        existentes = service.files().list(
+            q=(
+                f"'{parent_folder_id}' in parents and "
+                "mimeType = 'application/vnd.google-apps.folder' and "
+                f"name = '{escapar_drive_query(pasta_nome)}' and trashed = false"
+            ),
+            fields="files(id, name)",
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+        ).execute().get("files", [])
+        if existentes:
+            cotacao_folder_id = existentes[0]["id"]
+        else:
+            pasta = service.files().create(
+                body={
+                    "name": pasta_nome,
+                    "mimeType": "application/vnd.google-apps.folder",
+                    "parents": [parent_folder_id],
+                },
+                fields="id",
+                supportsAllDrives=True,
+            ).execute()
+            cotacao_folder_id = pasta["id"]
+
+    pasta_confirmada = service.files().get(
+        fileId=cotacao_folder_id,
+        fields="id, name, webViewLink",
+        supportsAllDrives=True,
+    ).execute()
+    if not pasta_confirmada.get("id"):
+        raise RuntimeError("Não foi possível confirmar a pasta da cotação no Google Drive.")
 
     filename = uploaded_file.name
     content_type = uploaded_file.type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
@@ -156,13 +196,15 @@ def upload_cotacao_google_drive(uploaded_file, solicitacao_id, ordem, rubrica_id
         "name": f"solicitacao_{solicitacao_id}_cotacao_{ordem}_{filename}",
         "parents": [cotacao_folder_id],
     }
-    service.files().create(
+    criado = service.files().create(
         body=metadata,
         media_body=media,
-        fields="id",
+        fields="id, name, parents, webViewLink",
         supportsAllDrives=True,
     ).execute()
-    return google_drive_folder_url(cotacao_folder_id)
+    if cotacao_folder_id not in criado.get("parents", []):
+        raise RuntimeError("O arquivo foi enviado, mas o Google Drive não confirmou vínculo com a pasta da cotação.")
+    return pasta_confirmada.get("webViewLink") or google_drive_folder_url(cotacao_folder_id)
 
 def has_column(table_name: str, column_name: str) -> bool:
     df = query("""
