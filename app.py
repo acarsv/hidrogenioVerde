@@ -1,5 +1,6 @@
 import os
 import mimetypes
+import re
 from io import BytesIO
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -77,7 +78,29 @@ def execute(sql, params=None):
     finally:
         conn.close()
 
-def upload_cotacao_google_drive(uploaded_file, solicitacao_id, ordem):
+def google_drive_folder_url(folder_id):
+    return f"https://drive.google.com/drive/folders/{folder_id}"
+
+
+def extrair_google_drive_folder_id(link):
+    if not link:
+        return None
+    parsed = urlparse(str(link).strip())
+    partes = [parte for parte in parsed.path.split("/") if parte]
+    if "folders" in partes:
+        indice = partes.index("folders")
+        if len(partes) > indice + 1:
+            return partes[indice + 1]
+    return None
+
+
+def nome_seguro_drive(valor):
+    texto = re.sub(r"[^0-9A-Za-zÀ-ÿ._ -]+", " ", str(valor or "")).strip()
+    texto = re.sub(r"\s+", " ", texto)
+    return texto[:120] or "sem_fornecedor"
+
+
+def upload_cotacao_google_drive(uploaded_file, solicitacao_id, ordem, rubrica_id=None, fornecedor=None, pasta_url=None):
     folder_id = os.environ.get("GOOGLE_DRIVE_COTACOES_FOLDER_ID") or os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
     service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     service_account_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
@@ -110,20 +133,36 @@ def upload_cotacao_google_drive(uploaded_file, solicitacao_id, ordem):
         )
 
     service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+    cotacao_folder_id = extrair_google_drive_folder_id(pasta_url)
+    if cotacao_folder_id == folder_id:
+        cotacao_folder_id = None
+    if not cotacao_folder_id:
+        pasta_nome = f"rubrica_{rubrica_id or solicitacao_id}_cotacao_{ordem}_{nome_seguro_drive(fornecedor)}"
+        pasta = service.files().create(
+            body={
+                "name": pasta_nome,
+                "mimeType": "application/vnd.google-apps.folder",
+                "parents": [folder_id],
+            },
+            fields="id",
+            supportsAllDrives=True,
+        ).execute()
+        cotacao_folder_id = pasta["id"]
+
     filename = uploaded_file.name
     content_type = uploaded_file.type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
     media = MediaIoBaseUpload(BytesIO(uploaded_file.getvalue()), mimetype=content_type, resumable=False)
     metadata = {
         "name": f"solicitacao_{solicitacao_id}_cotacao_{ordem}_{filename}",
-        "parents": [folder_id],
+        "parents": [cotacao_folder_id],
     }
-    created = service.files().create(
+    service.files().create(
         body=metadata,
         media_body=media,
-        fields="id, webViewLink",
+        fields="id",
         supportsAllDrives=True,
     ).execute()
-    return created.get("webViewLink") or f"https://drive.google.com/file/d/{created['id']}/view"
+    return google_drive_folder_url(cotacao_folder_id)
 
 def has_column(table_name: str, column_name: str) -> bool:
     df = query("""
@@ -1600,9 +1639,9 @@ elif menu == "cotacoes":
             contato = st.text_input("Telefone/E-mail", key=f"{prefixo}_contato")
             prazo = st.text_input("Prazo de entrega", key=f"{prefixo}_prazo")
             arquivo = st.file_uploader("Arquivo da cotação para o Google Drive", type=["pdf", "png", "jpg", "jpeg", "doc", "docx", "xls", "xlsx"], key=f"{prefixo}_arquivo")
-            arquivo_url = st.text_input("Link da cotação no Google Drive", key=f"{prefixo}_arquivo_url")
+            arquivo_url = st.text_input("Link da pasta da cotação no Google Drive", key=f"{prefixo}_arquivo_url")
             if str(arquivo_url or "").strip():
-                st.link_button("Abrir cotação no Google Drive", str(arquivo_url).strip())
+                st.link_button("Abrir pasta da cotação no Google Drive", str(arquivo_url).strip())
             observacoes_gerais = st.text_area("Observações gerais", key=f"{prefixo}_observacoes")
 
             st.markdown("### Adicionar item")
@@ -1689,9 +1728,16 @@ elif menu == "cotacoes":
                     st.error("Anexe o arquivo da cotação ou informe o link no Google Drive.")
                 else:
                     arquivo_url_final = str(arquivo_url or "").strip()
-                    if arquivo is not None and not arquivo_url_final:
+                    if arquivo is not None:
                         try:
-                            arquivo_url_final = upload_cotacao_google_drive(arquivo, sid, ordem)
+                            arquivo_url_final = upload_cotacao_google_drive(
+                                arquivo,
+                                sid,
+                                ordem,
+                                rubrica_id=rubrica_id,
+                                fornecedor=fornecedor,
+                                pasta_url=arquivo_url_final,
+                            )
                         except RuntimeError as exc:
                             st.error(str(exc))
                             st.stop()
@@ -1762,12 +1808,12 @@ elif menu == "cotacoes":
                     ("CNPJ/CPF", cotacao_row["cnpj_cpf"]),
                     ("Telefone/E-mail", cotacao_row["telefone_email"]),
                     ("Prazo de entrega", cotacao_row["prazo_entrega"]),
-                    ("Link Google Drive", cotacao_row["arquivo_url"]),
+                    ("Pasta Google Drive", cotacao_row["arquivo_url"]),
                     ("Observações gerais", cotacao_row["observacoes"]),
                 ], columns=["Campo", "Valor"])
                 st.dataframe(dados_empresa, use_container_width=True, hide_index=True)
                 if str(cotacao_row["arquivo_url"] or "").strip():
-                    st.link_button("Abrir cotação no Google Drive", str(cotacao_row["arquivo_url"]).strip())
+                    st.link_button("Abrir pasta da cotação no Google Drive", str(cotacao_row["arquivo_url"]).strip())
                 st.markdown("### Itens da cotação")
                 st.dataframe(cotacao_v2_formatar_itens(itens_cadastrados), use_container_width=True, hide_index=True)
                 st.metric("Valor final da cotação", format_currency_brl(cotacao_row["valor_total"]))
