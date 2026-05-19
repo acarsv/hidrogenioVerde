@@ -1658,6 +1658,7 @@ elif menu == "cotacoes":
 
         def cotacao_v2_formulario(prefixo, ordem, cotacao_atual=None, itens_existentes=None):
             cotacao_atual = cotacao_atual or {}
+            editando_cotacao = bool(cotacao_atual.get("id"))
             itens_existentes = itens_existentes if itens_existentes is not None else pd.DataFrame()
             valores_iniciais = {
                 f"{prefixo}_fornecedor": str(cotacao_atual.get("fornecedor", "") or ""),
@@ -1675,7 +1676,8 @@ elif menu == "cotacoes":
             if not st.session_state.get(f"{prefixo}_loaded"):
                 cotacao_v2_carregar_estado(prefixo, itens_existentes)
 
-            st.markdown(f"### Cotação {ordem} - dados da empresa")
+            st.markdown(f"### {'Editar' if editando_cotacao else 'Criar'} cotação {ordem}")
+            st.caption("Altere os dados e salve a edição da cotação existente." if editando_cotacao else "Preencha os dados da empresa, adicione os itens e salve a nova cotação.")
             fornecedor = st.text_input("Fornecedor", key=f"{prefixo}_fornecedor")
             cnpj = st.text_input("CNPJ/CPF", key=f"{prefixo}_cnpj")
             contato = st.text_input("Telefone/E-mail", key=f"{prefixo}_contato")
@@ -1686,7 +1688,7 @@ elif menu == "cotacoes":
                 st.link_button("Abrir pasta da cotação no Google Drive", str(arquivo_url).strip())
             observacoes_gerais = st.text_area("Observações gerais", key=f"{prefixo}_observacoes")
 
-            st.markdown("### Adicionar item")
+            st.markdown("### Adicionar item à cotação")
             item_id = st.selectbox(
                 "Item da rubrica",
                 pedido_itens["id"].tolist(),
@@ -1705,7 +1707,7 @@ elif menu == "cotacoes":
             with col_valor:
                 valor_unitario = st.number_input("Valor unitário", min_value=0.0, value=float(item_base["valor_unitario"] or 0), format="%.2f", key=f"{prefixo}_valor_{item_id}")
             observacao_item = st.text_input("Observação do item", key=f"{prefixo}_obs_item_{item_id}")
-            if st.button("Adicionar item", key=f"{prefixo}_adicionar"):
+            if st.button("Adicionar item à cotação", key=f"{prefixo}_adicionar"):
                 itens = list(st.session_state[f"{prefixo}_itens"])
                 itens.append({
                     "linha_id": f"novo_{len(itens) + 1}_{item_id}",
@@ -1757,7 +1759,8 @@ elif menu == "cotacoes":
                 st.info("Nenhum item adicionado.")
             st.metric("Valor total da cotação", format_currency_brl(valor_total))
 
-            if st.button("Salvar cotação", key=f"{prefixo}_salvar"):
+            texto_botao_salvar = "Salvar edição da cotação" if editando_cotacao else "Criar cotação"
+            if st.button(texto_botao_salvar, key=f"{prefixo}_salvar"):
                 if not fornecedor.strip():
                     st.error("Informe o fornecedor.")
                 elif len(itens_editados) == 0:
