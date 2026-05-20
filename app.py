@@ -181,11 +181,27 @@ def descrever_erro_google_drive(exc):
     return "Erro do Google Drive ao enviar arquivo. Confira permissões, ID da pasta e API habilitada."
 
 
+def descrever_erro_oauth_refresh(exc):
+    texto = str(exc)
+    if "invalid_grant" in texto:
+        return (
+            "Google OAuth recusou o REFRESH_TOKEN (invalid_grant). Gere um novo token com gerar_token_drive.py "
+            "e confira se GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET e GOOGLE_OAUTH_REFRESH_TOKEN no Streamlit "
+            "Secrets vieram da mesma credencial client_secret.json."
+        )
+    if "invalid_client" in texto or "unauthorized_client" in texto:
+        return (
+            "Google OAuth recusou CLIENT_ID/CLIENT_SECRET. Confira se os valores no Streamlit Secrets são exatamente "
+            "os gerados pelo gerar_token_drive.py e pertencem ao mesmo OAuth Client."
+        )
+    return "Google OAuth não conseguiu renovar o acesso ao Drive. Gere um novo REFRESH_TOKEN e atualize os Secrets."
+
+
 def upload_cotacao_google_drive(uploaded_file, solicitacao_id, ordem, rubrica_id=None, fornecedor=None, pasta_url=None):
     folder_id = config_value("GOOGLE_DRIVE_COTACOES_FOLDER_ID", "GOOGLE_DRIVE_FOLDER_ID")
-    oauth_client_id = config_value("GOOGLE_OAUTH_CLIENT_ID")
-    oauth_client_secret = config_value("GOOGLE_OAUTH_CLIENT_SECRET")
-    oauth_refresh_token = config_value("GOOGLE_OAUTH_REFRESH_TOKEN")
+    oauth_client_id = config_value("GOOGLE_OAUTH_CLIENT_ID", "CLIENT_ID")
+    oauth_client_secret = config_value("GOOGLE_OAUTH_CLIENT_SECRET", "CLIENT_SECRET")
+    oauth_refresh_token = config_value("GOOGLE_OAUTH_REFRESH_TOKEN", "REFRESH_TOKEN")
     service_account_json = config_value("GOOGLE_SERVICE_ACCOUNT_JSON")
     service_account_file = config_value("GOOGLE_APPLICATION_CREDENTIALS")
 
@@ -204,6 +220,7 @@ def upload_cotacao_google_drive(uploaded_file, solicitacao_id, ordem, rubrica_id
         from googleapiclient.discovery import build
         from googleapiclient.http import MediaIoBaseUpload
         from googleapiclient.errors import HttpError
+        from google.auth.exceptions import RefreshError
     except ImportError as exc:
         raise RuntimeError(
             "Dependencias do Google Drive ausentes. Instale google-api-python-client e google-auth."
@@ -316,6 +333,8 @@ def upload_cotacao_google_drive(uploaded_file, solicitacao_id, ordem, rubrica_id
         }
     except HttpError as exc:
         raise RuntimeError(descrever_erro_google_drive(exc)) from exc
+    except RefreshError as exc:
+        raise RuntimeError(descrever_erro_oauth_refresh(exc)) from exc
 
 def has_column(table_name: str, column_name: str) -> bool:
     df = query("""
