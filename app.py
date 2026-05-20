@@ -183,15 +183,23 @@ def descrever_erro_google_drive(exc):
 
 def upload_cotacao_google_drive(uploaded_file, solicitacao_id, ordem, rubrica_id=None, fornecedor=None, pasta_url=None):
     folder_id = config_value("GOOGLE_DRIVE_COTACOES_FOLDER_ID", "GOOGLE_DRIVE_FOLDER_ID")
+    oauth_client_id = config_value("GOOGLE_OAUTH_CLIENT_ID")
+    oauth_client_secret = config_value("GOOGLE_OAUTH_CLIENT_SECRET")
+    oauth_refresh_token = config_value("GOOGLE_OAUTH_REFRESH_TOKEN")
     service_account_json = config_value("GOOGLE_SERVICE_ACCOUNT_JSON")
     service_account_file = config_value("GOOGLE_APPLICATION_CREDENTIALS")
 
     if not folder_id:
         raise RuntimeError("GOOGLE_DRIVE_COTACOES_FOLDER_ID não foi definido no Streamlit Secrets ou no .env.")
-    if not service_account_json and not service_account_file:
-        raise RuntimeError("Defina GOOGLE_SERVICE_ACCOUNT_JSON ou GOOGLE_APPLICATION_CREDENTIALS no Streamlit Secrets ou no .env.")
+    tem_oauth = bool(oauth_client_id and oauth_client_secret and oauth_refresh_token)
+    if not tem_oauth and not service_account_json and not service_account_file:
+        raise RuntimeError(
+            "Defina GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET e GOOGLE_OAUTH_REFRESH_TOKEN "
+            "ou GOOGLE_SERVICE_ACCOUNT_JSON no Streamlit Secrets ou no .env."
+        )
 
     try:
+        from google.oauth2.credentials import Credentials
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
         from googleapiclient.http import MediaIoBaseUpload
@@ -202,7 +210,16 @@ def upload_cotacao_google_drive(uploaded_file, solicitacao_id, ordem, rubrica_id
         ) from exc
 
     scopes = ["https://www.googleapis.com/auth/drive"]
-    if service_account_json:
+    if tem_oauth:
+        credentials = Credentials(
+            token=None,
+            refresh_token=oauth_refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=oauth_client_id,
+            client_secret=oauth_client_secret,
+            scopes=scopes,
+        )
+    elif service_account_json:
         credentials = service_account.Credentials.from_service_account_info(
             carregar_service_account_info(service_account_json),
             scopes=scopes,
