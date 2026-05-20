@@ -156,6 +156,13 @@ def descrever_erro_google_drive(exc):
     except Exception:
         pass
 
+    if motivo == "storageQuotaExceeded":
+        return (
+            "O Google Drive criou a pasta, mas recusou o arquivo por quota de armazenamento da service account "
+            "(storageQuotaExceeded). Use uma pasta em Drive compartilhado do Google Workspace ou configure upload "
+            "com OAuth de um usuário real do Google Drive; em pasta de Meu Drive compartilhada, a service account "
+            "pode ficar sem quota para armazenar arquivos."
+        )
     if status in (401, 403):
         detalhe = f" Detalhe Google: {motivo or mensagem}." if (motivo or mensagem) else ""
         return (
