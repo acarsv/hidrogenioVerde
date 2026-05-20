@@ -2223,13 +2223,20 @@ elif menu == "compra_nota":
               valor_compra=excluded.valor_compra,
               comprador_id=excluded.comprador_id
             """, (sid, int(cotacao_vencedora_id), valor, user["id"]))
-            solicitacoes_compra_vencedora = query("""
-            select distinct pi.pedido_id
-            from pedido_itens pi
-            where pi.id = any(%s::bigint[])
-            """, (itens_cotacao_selecionada["pedido_item_id"].tolist(),))
-            for solicitacao_compra_id in solicitacoes_compra_vencedora["pedido_id"].dropna().tolist():
-                execute("update solicitacoes_compra set status='aguardando_nota' where id=%s", (int(solicitacao_compra_id),))
+            pedido_item_ids = []
+            for valor_item_id in itens_cotacao_selecionada["pedido_item_id"].dropna().tolist():
+                try:
+                    pedido_item_ids.append(int(float(valor_item_id)))
+                except (TypeError, ValueError):
+                    continue
+            if pedido_item_ids:
+                solicitacoes_compra_vencedora = query("""
+                select distinct pi.pedido_id
+                from pedido_itens pi
+                where pi.id = any(%s)
+                """, (pedido_item_ids,))
+                for solicitacao_compra_id in solicitacoes_compra_vencedora["pedido_id"].dropna().tolist():
+                    execute("update solicitacoes_compra set status='aguardando_nota' where id=%s", (int(solicitacao_compra_id),))
             sincronizar_orcamento()
             st.success("Compra registrada pela cotação vencedora. Orçamento atualizado e status: aguardando nota.")
 
