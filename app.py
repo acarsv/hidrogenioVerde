@@ -141,7 +141,7 @@ def carregar_service_account_info(service_account_json):
         )
 
 
-def descrever_erro_google_drive(exc):
+def descrever_erro_google_drive(exc, folder_config="GOOGLE_DRIVE_COTACOES_FOLDER_ID"):
     status = getattr(getattr(exc, "resp", None), "status", None)
     motivo = ""
     mensagem = ""
@@ -167,14 +167,14 @@ def descrever_erro_google_drive(exc):
         detalhe = f" Detalhe Google: {motivo or mensagem}." if (motivo or mensagem) else ""
         return (
             "Google Drive recusou o upload por falta de permissão. "
-            "Compartilhe a pasta GOOGLE_DRIVE_COTACOES_FOLDER_ID com o e-mail da service account como Editor "
+            f"Compartilhe a pasta {folder_config} com o e-mail da service account como Editor "
             "e confirme se a API Google Drive está habilitada no projeto."
             f"{detalhe}"
         )
     if status == 404:
         return (
             "A pasta do Google Drive não foi encontrada pela service account. "
-            "Confira o GOOGLE_DRIVE_COTACOES_FOLDER_ID e compartilhe essa pasta com a service account."
+            f"Confira o {folder_config} e compartilhe essa pasta com a service account."
         )
     if motivo or mensagem:
         return f"Erro do Google Drive ao enviar arquivo ({status or 'sem status'} - {motivo or mensagem})."
@@ -336,6 +336,175 @@ def upload_cotacao_google_drive(uploaded_file, solicitacao_id, ordem, rubrica_id
     except RefreshError as exc:
         raise RuntimeError(descrever_erro_oauth_refresh(exc)) from exc
 
+
+def upload_nota_fiscal_google_drive(uploaded_file, numero_nf, fornecedor, pasta_url=None):
+    notafiscal_root_id = config_value("GOOGLE_DRIVE_NOTAFISCAL_FOLDER_ID")
+    folder_id = notafiscal_root_id or config_value("GOOGLE_DRIVE_FOLDER_ID")
+    oauth_client_id = config_value("GOOGLE_OAUTH_CLIENT_ID", "CLIENT_ID")
+    oauth_client_secret = config_value("GOOGLE_OAUTH_CLIENT_SECRET", "CLIENT_SECRET")
+    oauth_refresh_token = config_value("GOOGLE_OAUTH_REFRESH_TOKEN", "REFRESH_TOKEN")
+    service_account_json = config_value("GOOGLE_SERVICE_ACCOUNT_JSON")
+    service_account_file = config_value("GOOGLE_APPLICATION_CREDENTIALS")
+
+    if not folder_id:
+        raise RuntimeError(
+            "GOOGLE_DRIVE_NOTAFISCAL_FOLDER_ID ou GOOGLE_DRIVE_FOLDER_ID nao foi definido no "
+            "Streamlit Secrets ou no .env."
+        )
+    tem_oauth = bool(oauth_client_id and oauth_client_secret and oauth_refresh_token)
+    if not tem_oauth and not service_account_json and not service_account_file:
+        raise RuntimeError(
+            "Defina GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET e GOOGLE_OAUTH_REFRESH_TOKEN "
+            "ou GOOGLE_SERVICE_ACCOUNT_JSON no Streamlit Secrets ou no .env."
+        )
+
+    try:
+        from google.oauth2.credentials import Credentials
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaIoBaseUpload
+        from googleapiclient.errors import HttpError
+        from google.auth.exceptions import RefreshError
+    except ImportError as exc:
+        raise RuntimeError(
+            "Dependencias do Google Drive ausentes. Instale google-api-python-client e google-auth."
+        ) from exc
+
+    scopes = ["https://www.googleapis.com/auth/drive"]
+    if tem_oauth:
+        credentials = Credentials(
+            token=None,
+            refresh_token=oauth_refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=oauth_client_id,
+            client_secret=oauth_client_secret,
+            scopes=scopes,
+        )
+    elif service_account_json:
+        credentials = service_account.Credentials.from_service_account_info(
+            carregar_service_account_info(service_account_json),
+            scopes=scopes,
+        )
+    else:
+        credentials = service_account.Credentials.from_service_account_file(
+            service_account_file,
+            scopes=scopes,
+        )
+
+    try:
+        service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+        parent_folder_id = folder_id
+        pasta_link_id = extrair_google_drive_folder_id(pasta_url)
+        nota_folder_id = None
+        pasta_nome = f"nf_{nome_seguro_drive(numero_nf)}_{nome_seguro_drive(fornecedor)}"
+
+        if pasta_link_id:
+            try:
+                pasta_link = service.files().get(
+                    fileId=pasta_link_id,
+                    fields="id, name, mimeType",
+                    supportsAllDrives=True,
+                ).execute()
+                if (
+                    pasta_link.get("mimeType") == "application/vnd.google-apps.folder"
+                    and str(pasta_link.get("name", "")).startswith("nf_")
+                ):
+                    nota_folder_id = pasta_link_id
+                elif pasta_link.get("mimeType") == "application/vnd.google-apps.folder":
+                    parent_folder_id = pasta_link_id
+            except HttpError:
+                parent_folder_id = folder_id
+                nota_folder_id = None
+
+        if not nota_folder_id:
+            if notafiscal_root_id and parent_folder_id == folder_id:
+                notafiscal_folder_id = notafiscal_root_id
+            else:
+                pastas_notafiscal = service.files().list(
+                    q=(
+                        f"'{parent_folder_id}' in parents and "
+                        "mimeType = 'application/vnd.google-apps.folder' and "
+                        "name = 'notafiscal' and trashed = false"
+                    ),
+                    fields="files(id, name)",
+                    includeItemsFromAllDrives=True,
+                    supportsAllDrives=True,
+                ).execute().get("files", [])
+                if pastas_notafiscal:
+                    notafiscal_folder_id = pastas_notafiscal[0]["id"]
+                else:
+                    pasta_notafiscal = service.files().create(
+                        body={
+                            "name": "notafiscal",
+                            "mimeType": "application/vnd.google-apps.folder",
+                            "parents": [parent_folder_id],
+                        },
+                        fields="id",
+                        supportsAllDrives=True,
+                    ).execute()
+                    notafiscal_folder_id = pasta_notafiscal["id"]
+
+            pastas_nf = service.files().list(
+                q=(
+                    f"'{notafiscal_folder_id}' in parents and "
+                    "mimeType = 'application/vnd.google-apps.folder' and "
+                    f"name = '{escapar_drive_query(pasta_nome)}' and trashed = false"
+                ),
+                fields="files(id, name)",
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
+            ).execute().get("files", [])
+            if pastas_nf:
+                nota_folder_id = pastas_nf[0]["id"]
+            else:
+                pasta_nf = service.files().create(
+                    body={
+                        "name": pasta_nome,
+                        "mimeType": "application/vnd.google-apps.folder",
+                        "parents": [notafiscal_folder_id],
+                    },
+                    fields="id",
+                    supportsAllDrives=True,
+                ).execute()
+                nota_folder_id = pasta_nf["id"]
+
+        pasta_confirmada = service.files().get(
+            fileId=nota_folder_id,
+            fields="id, name, webViewLink",
+            supportsAllDrives=True,
+        ).execute()
+        if not pasta_confirmada.get("id"):
+            raise RuntimeError("Nao foi possivel confirmar a pasta da nota fiscal no Google Drive.")
+
+        filename = uploaded_file.name
+        content_type = uploaded_file.type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        conteudo = uploaded_file.getvalue()
+        media = MediaIoBaseUpload(BytesIO(conteudo), mimetype=content_type, resumable=False)
+        criado = service.files().create(
+            body={
+                "name": f"nf_{nome_seguro_drive(numero_nf)}_{filename}",
+                "parents": [nota_folder_id],
+            },
+            media_body=media,
+            fields="id, name, parents, webViewLink",
+            supportsAllDrives=True,
+        ).execute()
+        if nota_folder_id not in criado.get("parents", []):
+            raise RuntimeError("O arquivo foi enviado, mas o Google Drive nao confirmou vinculo com a pasta da nota fiscal.")
+        return {
+            "folder_id": nota_folder_id,
+            "folder_link": pasta_confirmada.get("webViewLink") or google_drive_folder_url(nota_folder_id),
+            "file_id": criado.get("id"),
+            "file_link": criado.get("webViewLink"),
+            "nome_arquivo": filename,
+            "mime_type": content_type,
+            "tamanho_bytes": getattr(uploaded_file, "size", None) or len(conteudo),
+        }
+    except HttpError as exc:
+        raise RuntimeError(descrever_erro_google_drive(exc, "GOOGLE_DRIVE_NOTAFISCAL_FOLDER_ID ou GOOGLE_DRIVE_FOLDER_ID")) from exc
+    except RefreshError as exc:
+        raise RuntimeError(descrever_erro_oauth_refresh(exc)) from exc
+
 def has_column(table_name: str, column_name: str) -> bool:
     df = query("""
     select 1
@@ -375,6 +544,37 @@ def exibir_arquivos_cotacao(cotacao_id):
         column_config={"Link": st.column_config.LinkColumn("Abrir arquivo")},
     )
 
+
+def nota_fiscal_arquivos_df(nota_fiscal_id):
+    if not nota_fiscal_id:
+        return pd.DataFrame()
+    return query("""
+    select id, nome_arquivo, google_drive_link, mime_type, tamanho_bytes, criado_em
+    from nota_fiscal_arquivos
+    where nota_fiscal_id=%s
+    order by criado_em desc, id desc
+    """, (int(nota_fiscal_id),))
+
+
+def exibir_arquivos_nota_fiscal(nota_fiscal_id):
+    arquivos = nota_fiscal_arquivos_df(nota_fiscal_id)
+    if len(arquivos) == 0:
+        return
+    tabela = arquivos[["nome_arquivo", "google_drive_link", "criado_em"]].copy()
+    tabela = tabela.rename(columns={
+        "nome_arquivo": "Arquivo",
+        "google_drive_link": "Link",
+        "criado_em": "Enviado em",
+    })
+    st.markdown("### Arquivos vinculados a nota fiscal")
+    st.dataframe(
+        tabela,
+        use_container_width=True,
+        hide_index=True,
+        column_config={"Link": st.column_config.LinkColumn("Abrir arquivo")},
+    )
+
+
 def ensure_financial_governance_schema():
     if not has_column("cotacoes", "arquivo_url"):
         execute("alter table cotacoes add column arquivo_url text")
@@ -396,6 +596,18 @@ def ensure_financial_governance_schema():
     create table if not exists cotacao_arquivos (
       id bigserial primary key,
       cotacao_id bigint not null references cotacoes(id) on delete cascade,
+      google_drive_file_id text not null,
+      google_drive_link text,
+      nome_arquivo text not null,
+      mime_type text,
+      tamanho_bytes bigint,
+      criado_em timestamptz not null default now()
+    )
+    """)
+    execute("""
+    create table if not exists nota_fiscal_arquivos (
+      id bigserial primary key,
+      nota_fiscal_id bigint not null references notas_fiscais(id) on delete cascade,
       google_drive_file_id text not null,
       google_drive_link text,
       nome_arquivo text not null,
@@ -2303,7 +2515,27 @@ elif menu == "compra_nota":
             valor_nf_padrao = float(itens_nf_df["valor_total"].sum()) if len(itens_nf_df) else 0.0
             numero_nf = st.text_input("Número da NF")
             fornecedor_nf = st.text_input("Fornecedor da NF", value=fornecedor_padrao)
+            arquivo_nf = st.file_uploader(
+                "Arquivo da nota fiscal para o Google Drive",
+                type=["pdf", "png", "jpg", "jpeg", "xml"],
+                key=f"nota_arquivo_{compra_id}",
+            )
             local_nf = st.text_input("Local/link da NF no Google Drive")
+            if str(local_nf or "").strip():
+                st.link_button("Abrir pasta da nota fiscal no Google Drive", str(local_nf).strip())
+            if numero_nf.strip() and fornecedor_nf.strip():
+                nota_nf_existente = query("""
+                select id, arquivo_url
+                from notas_fiscais
+                where lower(trim(numero_nf)) = lower(trim(%s))
+                  and lower(trim(fornecedor)) = lower(trim(%s))
+                limit 1
+                """, (numero_nf, fornecedor_nf))
+                if len(nota_nf_existente):
+                    pasta_nf_existente = str(nota_nf_existente.iloc[0]["arquivo_url"] or "").strip()
+                    if pasta_nf_existente and pasta_nf_existente != str(local_nf or "").strip():
+                        st.link_button("Abrir pasta existente da nota fiscal", pasta_nf_existente)
+                    exibir_arquivos_nota_fiscal(int(nota_nf_existente.iloc[0]["id"]))
             if len(itens_nf_df):
                 itens_nf_editor = itens_nf_df[["pedido_item_id", "descricao", "fornecedor", "tipo_item", "quantidade", "valor_unitario"]].copy()
                 itens_nf_editor = itens_nf_editor.rename(columns={
@@ -2349,13 +2581,27 @@ elif menu == "compra_nota":
                 st.error("Uma NF deve conter itens de um único fornecedor vencedor.")
             elif not numero_nf.strip() or not fornecedor_nf.strip():
                 st.error("Informe número da NF e fornecedor.")
-            elif not local_nf.strip():
-                st.error("Informe o local ou link da NF no Google Drive.")
+            elif arquivo_nf is None and not local_nf.strip():
+                st.error("Anexe o arquivo da NF ou informe o local/link no Google Drive.")
             elif fornecedor_nf.strip().lower() != str(itens_nf_df["fornecedor"].iloc[0]).strip().lower():
                 st.error("O fornecedor da NF deve ser o mesmo fornecedor vencedor dos itens selecionados.")
             elif Decimal(str(valor_nf)) != Decimal(str(valor_nf_padrao)):
                 st.error("O valor da NF deve bater com a soma dos itens selecionados.")
             else:
+                upload_nf_resultado = None
+                local_nf_final = local_nf.strip()
+                if arquivo_nf is not None:
+                    try:
+                        upload_nf_resultado = upload_nota_fiscal_google_drive(
+                            arquivo_nf,
+                            numero_nf.strip(),
+                            fornecedor_nf.strip(),
+                            pasta_url=local_nf_final,
+                        )
+                        local_nf_final = upload_nf_resultado["folder_link"]
+                    except RuntimeError as exc:
+                        st.error(str(exc))
+                        st.stop()
                 nota_existente = query("""
                 select id, valor_nf
                 from notas_fiscais
@@ -2373,14 +2619,32 @@ elif menu == "compra_nota":
                         data_emissao=coalesce(data_emissao, %s),
                         lancado_por=coalesce(lancado_por, %s)
                     where id=%s
-                    """, (valor_nf_atualizado, local_nf.strip(), data_nf, user["id"], nota_id))
+                    """, (valor_nf_atualizado, local_nf_final, data_nf, user["id"], nota_id))
                 else:
                     nota_criada = query("""
                     insert into notas_fiscais (compra_id, solicitacao_id, numero_nf, fornecedor, valor_nf, data_emissao, arquivo_url, lancado_por)
                     values (%s,%s,%s,%s,%s,%s,%s,%s)
                     returning id
-                    """, (compra_id, sid, numero_nf, fornecedor_nf, valor_nf, data_nf, local_nf.strip(), user["id"]))
+                    """, (compra_id, sid, numero_nf, fornecedor_nf, valor_nf, data_nf, local_nf_final, user["id"]))
                     nota_id = int(nota_criada.iloc[0]["id"])
+                if upload_nf_resultado:
+                    execute("""
+                    insert into nota_fiscal_arquivos (
+                        nota_fiscal_id,
+                        google_drive_file_id,
+                        google_drive_link,
+                        nome_arquivo,
+                        mime_type,
+                        tamanho_bytes
+                    ) values (%s,%s,%s,%s,%s,%s)
+                    """, (
+                        nota_id,
+                        upload_nf_resultado["file_id"],
+                        upload_nf_resultado["file_link"],
+                        upload_nf_resultado["nome_arquivo"],
+                        upload_nf_resultado["mime_type"],
+                        upload_nf_resultado["tamanho_bytes"],
+                    ))
                 itens_nf_gravacao = itens_nf_df.merge(
                     itens_nf_editor[["pedido_item_id", "Valor unitario NF"]],
                     on="pedido_item_id",

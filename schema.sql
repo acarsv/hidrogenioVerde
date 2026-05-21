@@ -92,6 +92,17 @@ create table if not exists notas_fiscais (
   lancado_em timestamptz not null default now()
 );
 
+create table if not exists nota_fiscal_arquivos (
+  id bigserial primary key,
+  nota_fiscal_id bigint not null references notas_fiscais(id) on delete cascade,
+  google_drive_file_id text not null,
+  google_drive_link text,
+  nome_arquivo text not null,
+  mime_type text,
+  tamanho_bytes bigint,
+  criado_em timestamptz not null default now()
+);
+
 create table if not exists historico_status (
   id bigserial primary key,
   solicitacao_id bigint not null references solicitacoes_compra(id) on delete cascade,
