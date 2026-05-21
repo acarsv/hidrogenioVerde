@@ -1338,6 +1338,99 @@ def voltar_item_para_cotacao(pedido_item_id, usuario_id):
 
     sincronizar_orcamento()
 
+
+def voltar_compra_para_nota_fiscal(solicitacao_id, usuario_id):
+    conn = get_conn()
+    conn.autocommit = False
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+            select id, descricao
+            from solicitacoes_compra
+            where id=%s
+            """, (int(solicitacao_id),))
+            solicitacao = cur.fetchone()
+            if not solicitacao:
+                raise ValueError("Solicitacao nao encontrada.")
+
+            cur.execute("""
+            delete from patrimonio
+            where nota_fiscal_item_id in (
+                select nfi.id
+                from nota_fiscal_itens nfi
+                join pedido_itens pi on pi.id = nfi.pedido_item_id
+                where pi.pedido_id=%s
+            )
+            """, (int(solicitacao_id),))
+            cur.execute("""
+            delete from estoque_consumo
+            where nota_fiscal_item_id in (
+                select nfi.id
+                from nota_fiscal_itens nfi
+                join pedido_itens pi on pi.id = nfi.pedido_item_id
+                where pi.pedido_id=%s
+            )
+            """, (int(solicitacao_id),))
+            cur.execute("""
+            delete from atesto_servico
+            where nota_fiscal_item_id in (
+                select nfi.id
+                from nota_fiscal_itens nfi
+                join pedido_itens pi on pi.id = nfi.pedido_item_id
+                where pi.pedido_id=%s
+            )
+            """, (int(solicitacao_id),))
+
+            cur.execute("""
+            update solicitacoes_compra
+            set status='aguardando_nota',
+                atualizado_em=now()
+            where id=%s
+            """, (int(solicitacao_id),))
+            cur.execute("""
+            insert into historico_status (solicitacao_id,status_novo,usuario_id,observacao)
+            values (%s,'aguardando_nota',%s,%s)
+            """, (
+                int(solicitacao_id),
+                usuario_id,
+                f"Compra retornada do destino final para correcao de nota fiscal: {solicitacao['descricao']}",
+            ))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    sincronizar_orcamento()
+
+
+@st.dialog("Voltar para nota fiscal")
+def voltar_compra_para_nota_fiscal_dialog(itens_destino, usuario_id):
+    solicitacoes = itens_destino[["solicitacao", "rubrica"]].drop_duplicates().copy()
+    if len(solicitacoes) == 0:
+        st.info("Nao ha compras com nota fiscal para retornar.")
+        return
+
+    solicitacao_id = st.selectbox(
+        "Compra",
+        solicitacoes["solicitacao"].tolist(),
+        format_func=lambda valor: (
+            f"Solicitacao #{valor} - "
+            f"Rubrica {solicitacoes.loc[solicitacoes.solicitacao == valor, 'rubrica'].iloc[0]}"
+        ),
+        key="destino_voltar_solicitacao",
+    )
+    st.warning("Os registros de patrimonio, estoque ou atesto desta compra serao removidos para retornar a etapa da nota fiscal.")
+    if st.button("Voltar para nota fiscal", type="primary", use_container_width=True):
+        try:
+            voltar_compra_para_nota_fiscal(int(solicitacao_id), usuario_id)
+        except (ValueError, psycopg2.Error) as exc:
+            st.error(str(exc))
+        else:
+            st.success("Compra retornada para a etapa de nota fiscal.")
+            st.rerun()
+
 def ajustar_valor_solicitado_para_nf(pedido_item_id, usuario_id):
     conn = get_conn()
     conn.autocommit = False
@@ -2822,11 +2915,15 @@ elif menu == "destino_final":
     left join patrimonio p on p.nota_fiscal_item_id = nfi.id
     left join estoque_consumo e on e.nota_fiscal_item_id = nfi.id
     left join atesto_servico a on a.nota_fiscal_item_id = nfi.id
+    where s.status='finalizado'
     order by nf.lancado_em desc nulls last, nf.numero_nf, nfi.descricao
     """)
     if len(itens_destino) == 0:
         st.info("Ainda não há itens de nota fiscal para classificar.")
     else:
+        _, acao_voltar_nf = st.columns([4, 1])
+        if acao_voltar_nf.button("Voltar para NF", use_container_width=True):
+            voltar_compra_para_nota_fiscal_dialog(itens_destino, user["id"])
         pendentes = itens_destino[itens_destino["destino"] == "pendente"].copy()
         st.metric("Itens pendentes de destino", len(pendentes))
         st.dataframe(
