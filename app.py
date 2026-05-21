@@ -1426,6 +1426,109 @@ def ajustar_valor_solicitado_para_nf(pedido_item_id, usuario_id):
 
     sincronizar_orcamento()
 
+
+@st.dialog("Editar nota fiscal")
+def editar_numero_arquivo_nf_dialog(rubrica_id):
+    notas = query("""
+    select distinct
+      nf.id,
+      nf.numero_nf,
+      nf.fornecedor,
+      nf.valor_nf,
+      nf.arquivo_url,
+      nf.lancado_em
+    from notas_fiscais nf
+    join nota_fiscal_itens nfi on nfi.nota_fiscal_id = nf.id
+    join pedido_itens pi on pi.id = nfi.pedido_item_id
+    where pi.rubrica_id=%s
+    order by nf.lancado_em desc nulls last, nf.id desc
+    """, (int(rubrica_id),))
+    if len(notas) == 0:
+        st.info("Nao ha notas fiscais salvas nesta rubrica.")
+        return
+
+    nota_id = st.selectbox(
+        "Nota fiscal",
+        notas["id"].tolist(),
+        format_func=lambda valor: (
+            f"{notas.loc[notas.id == valor, 'numero_nf'].iloc[0]} - "
+            f"{notas.loc[notas.id == valor, 'fornecedor'].iloc[0]} - "
+            f"{format_currency_brl(notas.loc[notas.id == valor, 'valor_nf'].iloc[0])}"
+        ),
+        key=f"editar_nf_documento_{rubrica_id}",
+    )
+    nota = notas.loc[notas.id == nota_id].iloc[0]
+    numero_nf = st.text_input("Numero da NF", value=str(nota["numero_nf"] or ""), key=f"editar_nf_numero_{nota_id}")
+    arquivo_nf = st.file_uploader(
+        "Substituir PDF da nota fiscal",
+        type=["pdf"],
+        key=f"editar_nf_pdf_{nota_id}",
+    )
+    local_nf = str(nota["arquivo_url"] or "").strip()
+    if local_nf:
+        st.link_button("Abrir pasta atual da nota fiscal", local_nf)
+    exibir_arquivos_nota_fiscal(int(nota_id))
+
+    if st.button("Salvar correcao", type="primary", use_container_width=True):
+        if not numero_nf.strip():
+            st.error("Informe o numero da NF.")
+            return
+
+        nota_duplicada = query("""
+        select id
+        from notas_fiscais
+        where lower(trim(numero_nf)) = lower(trim(%s))
+          and lower(trim(fornecedor)) = lower(trim(%s))
+          and id <> %s
+        limit 1
+        """, (numero_nf, nota["fornecedor"], int(nota_id)))
+        if len(nota_duplicada):
+            st.error("Ja existe outra nota fiscal com este numero para o fornecedor.")
+            return
+
+        upload_nf_resultado = None
+        local_nf_final = local_nf
+        if arquivo_nf is not None:
+            try:
+                upload_nf_resultado = upload_nota_fiscal_google_drive(
+                    arquivo_nf,
+                    numero_nf.strip(),
+                    str(nota["fornecedor"] or "").strip(),
+                    pasta_url=local_nf_final,
+                )
+                local_nf_final = upload_nf_resultado["folder_link"]
+            except RuntimeError as exc:
+                st.error(str(exc))
+                st.stop()
+
+        execute("""
+        update notas_fiscais
+        set numero_nf=%s,
+            arquivo_url=coalesce(nullif(%s, ''), arquivo_url)
+        where id=%s
+        """, (numero_nf.strip(), local_nf_final, int(nota_id)))
+        if upload_nf_resultado:
+            execute("""
+            insert into nota_fiscal_arquivos (
+                nota_fiscal_id,
+                google_drive_file_id,
+                google_drive_link,
+                nome_arquivo,
+                mime_type,
+                tamanho_bytes
+            ) values (%s,%s,%s,%s,%s,%s)
+            """, (
+                int(nota_id),
+                upload_nf_resultado["file_id"],
+                upload_nf_resultado["file_link"],
+                upload_nf_resultado["nome_arquivo"],
+                upload_nf_resultado["mime_type"],
+                upload_nf_resultado["tamanho_bytes"],
+            ))
+        st.success("Nota fiscal corrigida.")
+        st.rerun()
+
+
 def sincronizar_orcamento():
     execute("update rubricas set valor_reservado = 0, valor_utilizado = 0")
     execute("""
@@ -2452,7 +2555,10 @@ elif menu == "compra_nota":
             sincronizar_orcamento()
             st.success("Compra registrada pela cotação vencedora. Orçamento atualizado e status: aguardando nota.")
 
-    st.markdown("### Lançar nota fiscal")
+    cabecalho_nf, acao_editar_nf = st.columns([4, 1])
+    cabecalho_nf.markdown("### Lançar nota fiscal")
+    if acao_editar_nf.button("Editar NF", use_container_width=True, key=f"editar_nf_botao_{rubrica_compra_id}"):
+        editar_numero_arquivo_nf_dialog(rubrica_compra_id)
     compra_df = query("""
     select c.id, c.valor_compra
     from compras c
@@ -2572,7 +2678,7 @@ elif menu == "compra_nota":
                 itens_nf_editor = pd.DataFrame()
             valor_nf = st.number_input("Valor da NF", min_value=0.0, value=valor_nf_padrao, key=f"nota_valor_nf_{compra_id}_{valor_nf_padrao:.2f}")
         data_nf = st.date_input("Data de emissão", value=date.today())
-        if st.button("Consolidar nota e finalizar"):
+        if st.button("Salvar nota fiscal"):
             if len(itens_pendentes) == 0:
                 st.info("Não há itens pendentes para lançar.")
             elif len(itens_nf_df) == 0:
@@ -2663,27 +2769,32 @@ elif menu == "compra_nota":
                         Decimal(str(item_nf["quantidade"])),
                         Decimal(str(item_nf["Valor unitario NF"])),
                     ))
-                total_itens = len(itens_vencedores)
-                total_lancado = len(ids_vencedores_lancados) + len(itens_nf_df)
-                if total_lancado >= total_itens:
-                    total_real_nf = query("""
-                    select coalesce(sum(nfi.valor_total), 0) as valor_total_real
-                    from nota_fiscal_itens nfi
-                    where nfi.pedido_item_id = any(%s::uuid[])
-                    """, (itens_vencedores["pedido_item_id"].tolist(),))
-                    valor_total_real = Decimal(str(total_real_nf.iloc[0]["valor_total_real"])) if len(total_real_nf) else Decimal("0")
-                    execute("update compras set valor_compra=%s where id=%s", (valor_total_real, compra_id))
-                    solicitacoes_finalizadas = query("""
-                    select distinct pedido_id
-                    from pedido_itens
-                    where id = any(%s::uuid[])
-                    """, (itens_vencedores["pedido_item_id"].tolist(),))
-                    for solicitacao_finalizada_id in solicitacoes_finalizadas["pedido_id"].dropna().tolist():
-                        execute("update solicitacoes_compra set status='finalizado' where id=%s", (int(solicitacao_finalizada_id),))
-                    st.success("Nota fiscal lançada. Todos os itens foram conferidos e a compra foi finalizada.")
-                else:
-                    st.success("Nota fiscal lançada. Ainda há itens pendentes de NF.")
+                st.success("Nota fiscal salva. Finalize a compra somente depois de conferir a nota.")
                 sincronizar_orcamento()
+
+        st.markdown("### Finalizar")
+        if st.button("Finalizar compra e nota fiscal", type="primary", key=f"finalizar_nf_{rubrica_compra_id}_{compra_id}"):
+            itens_sem_nf = ids_vencedores.difference(ids_lancados)
+            if itens_sem_nf:
+                st.error("Salve a nota fiscal de todos os itens vencedores antes de finalizar.")
+            else:
+                total_real_nf = query("""
+                select coalesce(sum(nfi.valor_total), 0) as valor_total_real
+                from nota_fiscal_itens nfi
+                where nfi.pedido_item_id = any(%s::uuid[])
+                """, (itens_vencedores["pedido_item_id"].tolist(),))
+                valor_total_real = Decimal(str(total_real_nf.iloc[0]["valor_total_real"])) if len(total_real_nf) else Decimal("0")
+                execute("update compras set valor_compra=%s where id=%s", (valor_total_real, compra_id))
+                solicitacoes_finalizadas = query("""
+                select distinct pedido_id
+                from pedido_itens
+                where id = any(%s::uuid[])
+                """, (itens_vencedores["pedido_item_id"].tolist(),))
+                for solicitacao_finalizada_id in solicitacoes_finalizadas["pedido_id"].dropna().tolist():
+                    execute("update solicitacoes_compra set status='finalizado' where id=%s", (int(solicitacao_finalizada_id),))
+                sincronizar_orcamento()
+                st.success("Compra e nota fiscal finalizadas.")
+                st.rerun()
 
 elif menu == "destino_final":
     itens_destino = query("""
