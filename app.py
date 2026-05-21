@@ -1656,10 +1656,14 @@ def sincronizar_orcamento():
           coalesce(sum(nfi.valor_total), 0) as valor_total
         from nota_fiscal_itens nfi
         join pedido_itens pi on pi.id = nfi.pedido_item_id
+        join solicitacoes_compra s on s.id = pi.pedido_id
         left join patrimonio p on p.nota_fiscal_item_id = nfi.id
         left join estoque_consumo e on e.nota_fiscal_item_id = nfi.id
         left join atesto_servico a on a.nota_fiscal_item_id = nfi.id
-        where p.id is not null or e.id is not null or a.id is not null
+        where s.status = 'finalizado'
+           or p.id is not null
+           or e.id is not null
+           or a.id is not null
         group by pi.rubrica_id
     ) totais
     where r.id = totais.rubrica_id
