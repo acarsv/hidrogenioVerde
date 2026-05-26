@@ -1642,6 +1642,8 @@ def editar_numero_arquivo_nf_dialog(rubrica_id):
     notas = query("""
     select distinct
       nf.id,
+      nf.compra_id,
+      nf.solicitacao_id,
       nf.numero_nf,
       nf.fornecedor,
       nf.valor_nf,
@@ -1678,6 +1680,74 @@ def editar_numero_arquivo_nf_dialog(rubrica_id):
     if local_nf:
         st.link_button("Abrir pasta atual da nota fiscal", local_nf)
     exibir_arquivos_nota_fiscal(int(nota_id))
+
+    st.markdown("### Valor extra nao debitado do projeto")
+    valores_extra_nf = query("""
+    select tipo, descricao, valor, responsavel_pagamento, data_pagamento, criado_em
+    from valores_extra_nao_debitados
+    where nota_fiscal_id=%s
+    order by criado_em desc
+    """, (int(nota_id),))
+    if len(valores_extra_nf):
+        total_extra_nf = valores_extra_nf["valor"].sum()
+        st.metric("Total extra desta NF", format_currency_brl(total_extra_nf))
+        tabela_extra_nf = valores_extra_nf.rename(columns={
+            "tipo": "Tipo",
+            "descricao": "Descricao",
+            "valor": "Valor",
+            "responsavel_pagamento": "Responsavel",
+            "data_pagamento": "Data",
+            "criado_em": "Registrado em",
+        })[["Tipo", "Descricao", "Valor", "Responsavel", "Data", "Registrado em"]].copy()
+        tabela_extra_nf["Valor"] = tabela_extra_nf["Valor"].apply(format_currency_brl)
+        st.dataframe(tabela_extra_nf, use_container_width=True, hide_index=True)
+    extra_tipo_nf = st.selectbox(
+        "Tipo do valor extra",
+        ["Taxa TED", "Tarifa bancaria", "Frete extra", "Outro"],
+        key=f"editar_nf_extra_tipo_{nota_id}",
+    )
+    extra_valor_nf = st.number_input(
+        "Valor que nao deve ser debitado do projeto",
+        min_value=0.0,
+        step=1.0,
+        format="%.2f",
+        key=f"editar_nf_extra_valor_{nota_id}",
+    )
+    extra_responsavel_nf = st.text_input(
+        "Responsavel pelo pagamento extra",
+        value="Gerente do projeto",
+        key=f"editar_nf_extra_responsavel_{nota_id}",
+    )
+    extra_data_nf = st.date_input("Data do pagamento extra", value=date.today(), key=f"editar_nf_extra_data_{nota_id}")
+    extra_descricao_nf = st.text_area(
+        "Descricao do valor extra",
+        value="Taxa gerada por pagamento via TED.",
+        key=f"editar_nf_extra_descricao_{nota_id}",
+    )
+    if st.button("Registrar valor extra desta NF", use_container_width=True, key=f"editar_nf_extra_salvar_{nota_id}"):
+        if Decimal(str(extra_valor_nf)) <= 0:
+            st.error("Informe um valor extra maior que zero.")
+        elif not str(extra_descricao_nf or "").strip():
+            st.error("Informe a descricao do valor extra.")
+        else:
+            execute("""
+            insert into valores_extra_nao_debitados
+              (compra_id, nota_fiscal_id, rubrica_id, solicitacao_id, tipo, descricao, valor, responsavel_pagamento, data_pagamento, registrado_por)
+            values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (
+                int(nota["compra_id"]),
+                int(nota_id),
+                int(rubrica_id),
+                int(nota["solicitacao_id"]) if nota["solicitacao_id"] is not None else None,
+                extra_tipo_nf,
+                extra_descricao_nf.strip(),
+                Decimal(str(extra_valor_nf)),
+                extra_responsavel_nf.strip() or None,
+                extra_data_nf,
+                user["id"],
+            ))
+            st.success("Valor extra registrado sem debitar do projeto.")
+            st.rerun()
 
     if st.button("Salvar correcao", type="primary", use_container_width=True):
         if not numero_nf.strip():
