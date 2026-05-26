@@ -81,6 +81,25 @@ def execute(sql, params=None):
     finally:
         conn.close()
 
+def acquire_startup_schema_lock():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("select pg_advisory_lock(2026052602)")
+        return conn
+    except Exception:
+        conn.close()
+        raise
+
+def release_startup_schema_lock(conn):
+    if not conn:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("select pg_advisory_unlock(2026052602)")
+    finally:
+        conn.close()
+
 def config_value(nome, alternativa=None):
     valor = os.environ.get(nome)
     if valor:
@@ -2242,7 +2261,9 @@ def sincronizar_orcamento():
     where r.id = totais.rubrica_id
     """)
 
+startup_schema_lock_conn = None
 try:
+    startup_schema_lock_conn = acquire_startup_schema_lock()
     ensure_permissions_schema()
     ensure_financial_governance_schema()
     criar_schema_ia_operacional()
@@ -2252,6 +2273,8 @@ except psycopg2.Error as exc:
     with st.expander("Detalhe tecnico"):
         st.code(str(exc))
     st.stop()
+finally:
+    release_startup_schema_lock(startup_schema_lock_conn)
 
 if "user" not in st.session_state:
     st.session_state.user = None
