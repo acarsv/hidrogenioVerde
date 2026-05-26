@@ -507,6 +507,174 @@ def upload_nota_fiscal_google_drive(uploaded_file, numero_nf, fornecedor, pasta_
     except RefreshError as exc:
         raise RuntimeError(descrever_erro_oauth_refresh(exc)) from exc
 
+def upload_comprovante_bancario_google_drive(uploaded_file, compra_id, fornecedor=None, pasta_url=None):
+    comprovantes_root_id = config_value("GOOGLE_DRIVE_COMPROVANTES_FOLDER_ID")
+    folder_id = comprovantes_root_id or config_value("GOOGLE_DRIVE_FOLDER_ID")
+    oauth_client_id = config_value("GOOGLE_OAUTH_CLIENT_ID", "CLIENT_ID")
+    oauth_client_secret = config_value("GOOGLE_OAUTH_CLIENT_SECRET", "CLIENT_SECRET")
+    oauth_refresh_token = config_value("GOOGLE_OAUTH_REFRESH_TOKEN", "REFRESH_TOKEN")
+    service_account_json = config_value("GOOGLE_SERVICE_ACCOUNT_JSON")
+    service_account_file = config_value("GOOGLE_APPLICATION_CREDENTIALS")
+
+    if not folder_id:
+        raise RuntimeError(
+            "GOOGLE_DRIVE_COMPROVANTES_FOLDER_ID ou GOOGLE_DRIVE_FOLDER_ID nao foi definido no "
+            "Streamlit Secrets ou no .env."
+        )
+    tem_oauth = bool(oauth_client_id and oauth_client_secret and oauth_refresh_token)
+    if not tem_oauth and not service_account_json and not service_account_file:
+        raise RuntimeError(
+            "Defina GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET e GOOGLE_OAUTH_REFRESH_TOKEN "
+            "ou GOOGLE_SERVICE_ACCOUNT_JSON no Streamlit Secrets ou no .env."
+        )
+
+    try:
+        from google.oauth2.credentials import Credentials
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaIoBaseUpload
+        from googleapiclient.errors import HttpError
+        from google.auth.exceptions import RefreshError
+    except ImportError as exc:
+        raise RuntimeError(
+            "Dependencias do Google Drive ausentes. Instale google-api-python-client e google-auth."
+        ) from exc
+
+    scopes = ["https://www.googleapis.com/auth/drive"]
+    if tem_oauth:
+        credentials = Credentials(
+            token=None,
+            refresh_token=oauth_refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=oauth_client_id,
+            client_secret=oauth_client_secret,
+            scopes=scopes,
+        )
+    elif service_account_json:
+        credentials = service_account.Credentials.from_service_account_info(
+            carregar_service_account_info(service_account_json),
+            scopes=scopes,
+        )
+    else:
+        credentials = service_account.Credentials.from_service_account_file(
+            service_account_file,
+            scopes=scopes,
+        )
+
+    try:
+        service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+        parent_folder_id = folder_id
+        pasta_link_id = extrair_google_drive_folder_id(pasta_url)
+        comprovante_folder_id = None
+        pasta_nome = f"compra_{compra_id}_comprovantes_{nome_seguro_drive(fornecedor)}"
+
+        if pasta_link_id:
+            try:
+                pasta_link = service.files().get(
+                    fileId=pasta_link_id,
+                    fields="id, name, mimeType",
+                    supportsAllDrives=True,
+                ).execute()
+                if (
+                    pasta_link.get("mimeType") == "application/vnd.google-apps.folder"
+                    and str(pasta_link.get("name", "")).startswith(f"compra_{compra_id}_comprovantes_")
+                ):
+                    comprovante_folder_id = pasta_link_id
+                elif pasta_link.get("mimeType") == "application/vnd.google-apps.folder":
+                    parent_folder_id = pasta_link_id
+            except HttpError:
+                parent_folder_id = folder_id
+                comprovante_folder_id = None
+
+        if not comprovante_folder_id:
+            if comprovantes_root_id and parent_folder_id == folder_id:
+                comprovantes_folder_id = comprovantes_root_id
+            else:
+                pastas_comprovantes = service.files().list(
+                    q=(
+                        f"'{parent_folder_id}' in parents and "
+                        "mimeType = 'application/vnd.google-apps.folder' and "
+                        "name = 'comprovantes_bancarios' and trashed = false"
+                    ),
+                    fields="files(id, name)",
+                    includeItemsFromAllDrives=True,
+                    supportsAllDrives=True,
+                ).execute().get("files", [])
+                if pastas_comprovantes:
+                    comprovantes_folder_id = pastas_comprovantes[0]["id"]
+                else:
+                    pasta_comprovantes = service.files().create(
+                        body={
+                            "name": "comprovantes_bancarios",
+                            "mimeType": "application/vnd.google-apps.folder",
+                            "parents": [parent_folder_id],
+                        },
+                        fields="id",
+                        supportsAllDrives=True,
+                    ).execute()
+                    comprovantes_folder_id = pasta_comprovantes["id"]
+
+            pastas_compra = service.files().list(
+                q=(
+                    f"'{comprovantes_folder_id}' in parents and "
+                    "mimeType = 'application/vnd.google-apps.folder' and "
+                    f"name = '{escapar_drive_query(pasta_nome)}' and trashed = false"
+                ),
+                fields="files(id, name)",
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
+            ).execute().get("files", [])
+            if pastas_compra:
+                comprovante_folder_id = pastas_compra[0]["id"]
+            else:
+                pasta_compra = service.files().create(
+                    body={
+                        "name": pasta_nome,
+                        "mimeType": "application/vnd.google-apps.folder",
+                        "parents": [comprovantes_folder_id],
+                    },
+                    fields="id",
+                    supportsAllDrives=True,
+                ).execute()
+                comprovante_folder_id = pasta_compra["id"]
+
+        pasta_confirmada = service.files().get(
+            fileId=comprovante_folder_id,
+            fields="id, name, webViewLink",
+            supportsAllDrives=True,
+        ).execute()
+        if not pasta_confirmada.get("id"):
+            raise RuntimeError("Nao foi possivel confirmar a pasta do comprovante bancario no Google Drive.")
+
+        filename = uploaded_file.name
+        content_type = uploaded_file.type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        conteudo = uploaded_file.getvalue()
+        media = MediaIoBaseUpload(BytesIO(conteudo), mimetype=content_type, resumable=False)
+        criado = service.files().create(
+            body={
+                "name": f"compra_{compra_id}_comprovante_{filename}",
+                "parents": [comprovante_folder_id],
+            },
+            media_body=media,
+            fields="id, name, parents, webViewLink",
+            supportsAllDrives=True,
+        ).execute()
+        if comprovante_folder_id not in criado.get("parents", []):
+            raise RuntimeError("O arquivo foi enviado, mas o Google Drive nao confirmou vinculo com a pasta do comprovante.")
+        return {
+            "folder_id": comprovante_folder_id,
+            "folder_link": pasta_confirmada.get("webViewLink") or google_drive_folder_url(comprovante_folder_id),
+            "file_id": criado.get("id"),
+            "file_link": criado.get("webViewLink"),
+            "nome_arquivo": filename,
+            "mime_type": content_type,
+            "tamanho_bytes": getattr(uploaded_file, "size", None) or len(conteudo),
+        }
+    except HttpError as exc:
+        raise RuntimeError(descrever_erro_google_drive(exc, "GOOGLE_DRIVE_COMPROVANTES_FOLDER_ID ou GOOGLE_DRIVE_FOLDER_ID")) from exc
+    except RefreshError as exc:
+        raise RuntimeError(descrever_erro_oauth_refresh(exc)) from exc
+
 def has_column(table_name: str, column_name: str) -> bool:
     df = query("""
     select 1
@@ -556,6 +724,49 @@ def nota_fiscal_arquivos_df(nota_fiscal_id):
     where nota_fiscal_id=%s
     order by criado_em desc, id desc
     """, (int(nota_fiscal_id),))
+
+
+def comprovantes_bancarios_df(compra_id):
+    if not compra_id:
+        return pd.DataFrame()
+    return query("""
+    select
+      cb.id,
+      cb.nota_fiscal_id,
+      cb.google_drive_link,
+      cb.pasta_google_drive_link,
+      cb.nome_arquivo,
+      cb.mime_type,
+      cb.tamanho_bytes,
+      cb.observacao,
+      cb.criado_em,
+      nf.numero_nf
+    from comprovantes_bancarios cb
+    left join notas_fiscais nf on nf.id = cb.nota_fiscal_id
+    where cb.compra_id=%s
+    order by cb.criado_em desc, cb.id desc
+    """, (int(compra_id),))
+
+
+def exibir_comprovantes_bancarios(compra_id):
+    arquivos = comprovantes_bancarios_df(compra_id)
+    if len(arquivos) == 0:
+        return
+    tabela = arquivos[["numero_nf", "nome_arquivo", "google_drive_link", "observacao", "criado_em"]].copy()
+    tabela = tabela.rename(columns={
+        "numero_nf": "NF",
+        "nome_arquivo": "Arquivo",
+        "google_drive_link": "Link",
+        "observacao": "Observacao",
+        "criado_em": "Enviado em",
+    })
+    st.markdown("### Comprovantes bancarios vinculados")
+    st.dataframe(
+        tabela,
+        use_container_width=True,
+        hide_index=True,
+        column_config={"Link": st.column_config.LinkColumn("Abrir arquivo")},
+    )
 
 
 def exibir_arquivos_nota_fiscal(nota_fiscal_id):
@@ -615,6 +826,22 @@ def ensure_financial_governance_schema():
       nome_arquivo text not null,
       mime_type text,
       tamanho_bytes bigint,
+      criado_em timestamptz not null default now()
+    )
+    """)
+    execute("""
+    create table if not exists comprovantes_bancarios (
+      id bigserial primary key,
+      compra_id bigint not null references compras(id) on delete cascade,
+      nota_fiscal_id bigint references notas_fiscais(id) on delete set null,
+      google_drive_file_id text not null,
+      google_drive_link text,
+      pasta_google_drive_link text,
+      nome_arquivo text not null,
+      mime_type text,
+      tamanho_bytes bigint,
+      observacao text,
+      enviado_por uuid references usuarios_app(id),
       criado_em timestamptz not null default now()
     )
     """)
@@ -3040,6 +3267,93 @@ elif menu == "compra_nota":
                 })[["Tipo", "Descricao", "Valor", "Responsavel", "Data", "Registrado em"]].copy()
                 tabela_extra_compra["Valor"] = tabela_extra_compra["Valor"].apply(format_currency_brl)
                 st.dataframe(tabela_extra_compra, use_container_width=True, hide_index=True)
+
+        with st.expander("Comprovante bancario", expanded=False):
+            notas_comprovante = query("""
+            select id, numero_nf, fornecedor, valor_nf
+            from notas_fiscais
+            where compra_id=%s
+            order by lancado_em desc
+            """, (compra_id,))
+            comprovantes_salvos = comprovantes_bancarios_df(compra_id)
+            pasta_comprovante_atual = ""
+            if len(comprovantes_salvos):
+                pasta_comprovante_atual = str(comprovantes_salvos.iloc[0]["pasta_google_drive_link"] or "").strip()
+            if pasta_comprovante_atual:
+                st.link_button("Abrir pasta dos comprovantes bancarios", pasta_comprovante_atual)
+
+            nota_comprovante_opcoes = [None] + notas_comprovante["id"].tolist() if len(notas_comprovante) else [None]
+            nota_comprovante_id = st.selectbox(
+                "Nota fiscal vinculada ao comprovante",
+                nota_comprovante_opcoes,
+                format_func=lambda valor: "Sem NF vinculada" if valor is None else (
+                    f"NF {notas_comprovante.loc[notas_comprovante.id == valor, 'numero_nf'].iloc[0]} - "
+                    f"{notas_comprovante.loc[notas_comprovante.id == valor, 'fornecedor'].iloc[0]}"
+                ),
+                key=f"comprovante_nota_{compra_id}",
+            )
+            arquivo_comprovante = st.file_uploader(
+                "Upload do comprovante bancario",
+                type=["pdf", "png", "jpg", "jpeg"],
+                key=f"comprovante_arquivo_{compra_id}",
+            )
+            link_pasta_comprovante = st.text_input(
+                "Link da pasta de comprovantes no Google Drive",
+                value=pasta_comprovante_atual,
+                key=f"comprovante_pasta_{compra_id}",
+            )
+            observacao_comprovante = st.text_area(
+                "Observacao do comprovante",
+                key=f"comprovante_observacao_{compra_id}",
+            )
+            if st.button("Enviar comprovante bancario", use_container_width=True, key=f"comprovante_salvar_{compra_id}"):
+                if arquivo_comprovante is None:
+                    st.error("Anexe o comprovante bancario.")
+                else:
+                    fornecedor_comprovante = ""
+                    if nota_comprovante_id is not None and len(notas_comprovante):
+                        fornecedor_comprovante = str(notas_comprovante.loc[notas_comprovante.id == nota_comprovante_id, "fornecedor"].iloc[0] or "")
+                    elif len(itens_cotacao_selecionada):
+                        fornecedor_comprovante = str(itens_cotacao_selecionada["fornecedor"].iloc[0] or "")
+                    try:
+                        upload_comprovante = upload_comprovante_bancario_google_drive(
+                            arquivo_comprovante,
+                            compra_id,
+                            fornecedor=fornecedor_comprovante,
+                            pasta_url=str(link_pasta_comprovante or "").strip(),
+                        )
+                    except RuntimeError as exc:
+                        st.error(str(exc))
+                        st.stop()
+                    execute("""
+                    insert into comprovantes_bancarios (
+                        compra_id,
+                        nota_fiscal_id,
+                        google_drive_file_id,
+                        google_drive_link,
+                        pasta_google_drive_link,
+                        nome_arquivo,
+                        mime_type,
+                        tamanho_bytes,
+                        observacao,
+                        enviado_por
+                    ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """, (
+                        compra_id,
+                        int(nota_comprovante_id) if nota_comprovante_id is not None else None,
+                        upload_comprovante["file_id"],
+                        upload_comprovante["file_link"],
+                        upload_comprovante["folder_link"],
+                        upload_comprovante["nome_arquivo"],
+                        upload_comprovante["mime_type"],
+                        upload_comprovante["tamanho_bytes"],
+                        observacao_comprovante.strip() or None,
+                        user["id"],
+                    ))
+                    st.success("Comprovante bancario enviado.")
+                    st.rerun()
+            exibir_comprovantes_bancarios(compra_id)
+
         itens_vencedores = query("""
         select
           ci.pedido_item_id,
