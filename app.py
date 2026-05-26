@@ -85,7 +85,11 @@ def acquire_startup_schema_lock():
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("select pg_advisory_lock(2026052602)")
+            cur.execute("select pg_try_advisory_lock(2026052602)")
+            locked = cur.fetchone()[0]
+            if not locked:
+                conn.close()
+                return None
         return conn
     except Exception:
         conn.close()
@@ -2264,9 +2268,10 @@ def sincronizar_orcamento():
 startup_schema_lock_conn = None
 try:
     startup_schema_lock_conn = acquire_startup_schema_lock()
-    ensure_permissions_schema()
-    ensure_financial_governance_schema()
-    criar_schema_ia_operacional()
+    if startup_schema_lock_conn:
+        ensure_permissions_schema()
+        ensure_financial_governance_schema()
+        criar_schema_ia_operacional()
 except psycopg2.Error as exc:
     st.error("Nao foi possivel preparar o banco de dados para iniciar o app.")
     st.caption("Confira se as tabelas foram criadas no Supabase e reinicie o app no Streamlit Cloud.")
