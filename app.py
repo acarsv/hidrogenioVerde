@@ -618,6 +618,22 @@ def ensure_financial_governance_schema():
       criado_em timestamptz not null default now()
     )
     """)
+    execute("""
+    create table if not exists valores_extra_nao_debitados (
+      id bigserial primary key,
+      compra_id bigint references compras(id) on delete cascade,
+      nota_fiscal_id bigint references notas_fiscais(id) on delete set null,
+      rubrica_id bigint references rubricas(id),
+      solicitacao_id bigint references solicitacoes_compra(id),
+      tipo text not null default 'taxa_ted',
+      descricao text not null,
+      valor numeric(14,2) not null check (valor >= 0),
+      responsavel_pagamento text,
+      data_pagamento date,
+      registrado_por uuid references usuarios_app(id),
+      criado_em timestamptz not null default now()
+    )
+    """)
     if not has_column("rubricas", "valor_minimo_operacional"):
         execute("alter table rubricas add column valor_minimo_operacional numeric(14,2) not null default 0")
     if not has_column("rubricas", "reserva_tecnica_percentual"):
@@ -903,6 +919,52 @@ def carregar_compras_por_mes_orcamento():
     group by 1
     order by 1
     """, (PERIODO_PRESTACAO_INICIO, PERIODO_PRESTACAO_FIM))
+
+def carregar_valores_extra_nao_debitados(compra_id=None):
+    filtro = ""
+    params = []
+    if compra_id is not None:
+        filtro = "where v.compra_id = %s"
+        params.append(int(compra_id))
+    return query(f"""
+    select
+      v.id,
+      v.compra_id,
+      v.nota_fiscal_id,
+      coalesce(r.codigo, '-') as rubrica,
+      v.solicitacao_id,
+      v.tipo,
+      v.descricao,
+      v.valor,
+      v.responsavel_pagamento,
+      v.data_pagamento,
+      v.criado_em
+    from valores_extra_nao_debitados v
+    left join rubricas r on r.id = v.rubrica_id
+    {filtro}
+    order by v.criado_em desc
+    """, tuple(params))
+
+def exibir_resumo_valores_extra_nao_debitados():
+    valores_extra = carregar_valores_extra_nao_debitados()
+    total_extra = valores_extra["valor"].sum() if len(valores_extra) else Decimal("0")
+    with st.expander("Valores extras nao debitados do projeto", expanded=False):
+        st.metric("Total a pagar fora do projeto", format_currency_brl(total_extra))
+        if len(valores_extra):
+            tabela = valores_extra.rename(columns={
+                "rubrica": "Rubrica",
+                "solicitacao_id": "Solicitacao",
+                "tipo": "Tipo",
+                "descricao": "Descricao",
+                "valor": "Valor",
+                "responsavel_pagamento": "Responsavel pelo pagamento",
+                "data_pagamento": "Data",
+                "criado_em": "Registrado em",
+            })[["Rubrica", "Solicitacao", "Tipo", "Descricao", "Valor", "Responsavel pelo pagamento", "Data", "Registrado em"]].copy()
+            tabela["Valor"] = tabela["Valor"].apply(format_currency_brl)
+            st.dataframe(tabela, use_container_width=True, hide_index=True)
+        else:
+            st.info("Ainda nao ha valores extras registrados.")
 
 def excede_saldo_disponivel(rubrica_id: int, valor: Decimal) -> tuple[bool, Decimal]:
     saldo_df = query("select saldo_disponivel from vw_orcamento where id=%s", (rubrica_id,))
@@ -2651,6 +2713,7 @@ elif menu == "cotacoes":
         st.stop()
 
 elif menu == "compra_nota":
+    exibir_resumo_valores_extra_nao_debitados()
     solicitacoes_compra = query("""
     select id, rubrica_id, descricao
     from solicitacoes_compra
@@ -2828,6 +2891,85 @@ elif menu == "compra_nota":
         compra_id = int(compra_df.iloc[0]["id"])
         valor_compra = float(compra_df.iloc[0]["valor_compra"])
         st.number_input("ID da compra", min_value=1, value=compra_id, disabled=True, key=f"nota_compra_id_{sid}_{compra_id}")
+        with st.expander("Registrar valor extra nao debitado do projeto", expanded=False):
+            st.caption("Use para taxas bancarias, TED ou outros custos que serao pagos fora do orcamento do projeto.")
+            notas_compra_extra = query("""
+            select id, numero_nf, fornecedor, valor_nf
+            from notas_fiscais
+            where compra_id=%s
+            order by lancado_em desc
+            """, (compra_id,))
+            nota_extra_opcoes = [None] + notas_compra_extra["id"].tolist() if len(notas_compra_extra) else [None]
+            nota_extra_id = st.selectbox(
+                "Nota fiscal vinculada",
+                nota_extra_opcoes,
+                format_func=lambda valor: "Sem NF vinculada" if valor is None else (
+                    f"NF {notas_compra_extra.loc[notas_compra_extra.id == valor, 'numero_nf'].iloc[0]} - "
+                    f"{notas_compra_extra.loc[notas_compra_extra.id == valor, 'fornecedor'].iloc[0]}"
+                ),
+                key=f"extra_nota_{compra_id}",
+            )
+            extra_tipo = st.selectbox(
+                "Tipo",
+                ["Taxa TED", "Tarifa bancaria", "Frete extra", "Outro"],
+                key=f"extra_tipo_{compra_id}",
+            )
+            extra_valor = st.number_input(
+                "Valor nao debitado do projeto",
+                min_value=0.0,
+                step=1.0,
+                format="%.2f",
+                key=f"extra_valor_{compra_id}",
+            )
+            extra_responsavel = st.text_input(
+                "Responsavel pelo pagamento",
+                value="Gerente do projeto",
+                key=f"extra_responsavel_{compra_id}",
+            )
+            extra_data = st.date_input("Data do pagamento/registro", value=date.today(), key=f"extra_data_{compra_id}")
+            extra_descricao = st.text_area(
+                "Descricao/justificativa",
+                value="Taxa gerada por pagamento via TED.",
+                key=f"extra_descricao_{compra_id}",
+            )
+            if st.button("Salvar valor extra", key=f"extra_salvar_{compra_id}"):
+                if Decimal(str(extra_valor)) <= 0:
+                    st.error("Informe um valor maior que zero.")
+                elif not str(extra_descricao or "").strip():
+                    st.error("Informe a descricao do valor extra.")
+                else:
+                    execute("""
+                    insert into valores_extra_nao_debitados
+                      (compra_id, nota_fiscal_id, rubrica_id, solicitacao_id, tipo, descricao, valor, responsavel_pagamento, data_pagamento, registrado_por)
+                    values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """, (
+                        compra_id,
+                        int(nota_extra_id) if nota_extra_id is not None else None,
+                        rubrica_compra_id,
+                        sid,
+                        extra_tipo,
+                        extra_descricao.strip(),
+                        Decimal(str(extra_valor)),
+                        extra_responsavel.strip() or None,
+                        extra_data,
+                        user["id"],
+                    ))
+                    st.success("Valor extra registrado sem debitar do projeto.")
+                    st.rerun()
+            valores_extra_compra = carregar_valores_extra_nao_debitados(compra_id)
+            if len(valores_extra_compra):
+                total_extra_compra = valores_extra_compra["valor"].sum()
+                st.metric("Total extra desta compra", format_currency_brl(total_extra_compra))
+                tabela_extra_compra = valores_extra_compra.rename(columns={
+                    "tipo": "Tipo",
+                    "descricao": "Descricao",
+                    "valor": "Valor",
+                    "responsavel_pagamento": "Responsavel",
+                    "data_pagamento": "Data",
+                    "criado_em": "Registrado em",
+                })[["Tipo", "Descricao", "Valor", "Responsavel", "Data", "Registrado em"]].copy()
+                tabela_extra_compra["Valor"] = tabela_extra_compra["Valor"].apply(format_currency_brl)
+                st.dataframe(tabela_extra_compra, use_container_width=True, hide_index=True)
         itens_vencedores = query("""
         select
           ci.pedido_item_id,

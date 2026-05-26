@@ -103,6 +103,21 @@ create table if not exists nota_fiscal_arquivos (
   criado_em timestamptz not null default now()
 );
 
+create table if not exists valores_extra_nao_debitados (
+  id bigserial primary key,
+  compra_id bigint references compras(id) on delete cascade,
+  nota_fiscal_id bigint references notas_fiscais(id) on delete set null,
+  rubrica_id bigint references rubricas(id),
+  solicitacao_id bigint references solicitacoes_compra(id),
+  tipo text not null default 'taxa_ted',
+  descricao text not null,
+  valor numeric(14,2) not null check (valor >= 0),
+  responsavel_pagamento text,
+  data_pagamento date,
+  registrado_por uuid references usuarios_app(id),
+  criado_em timestamptz not null default now()
+);
+
 create table if not exists historico_status (
   id bigserial primary key,
   solicitacao_id bigint not null references solicitacoes_compra(id) on delete cascade,
