@@ -760,7 +760,7 @@ def exibir_comprovantes_bancarios(compra_id):
         "observacao": "Observacao",
         "criado_em": "Enviado em",
     })
-    st.markdown("### Comprovantes bancarios vinculados")
+    st.markdown("### Comprovantes bancários vinculados")
     st.dataframe(
         tabela,
         use_container_width=True,
@@ -1275,11 +1275,17 @@ def classificar_risco_prazo(percentual_compras, percentual_tempo, saldo_disponiv
 def descrever_risco_prazo(risco: str) -> str:
     return {
         "Verde": "No ritmo",
-        "Amarelo": "Atencao",
+        "Amarelo": "Atenção",
         "Laranja": "Atraso",
-        "Vermelho": "Critico",
+        "Vermelho": "Crítico",
         "Cinza": "Encerrado/sem saldo",
     }.get(risco, "No ritmo")
+
+def descrever_status_financeiro(status: str) -> str:
+    return {
+        "Critico": "Crítico",
+        "Disponivel": "Disponível",
+    }.get(status, status)
 
 def carregar_compras_por_mes_orcamento():
     return query("""
@@ -2279,7 +2285,7 @@ BASE_MENU_OPTIONS = [
     ("solicitacoes", "Solicitações"),
     ("cotacoes", "Cotações"),
     ("compra_nota", "Compra e nota fiscal"),
-    ("comprovantes_bancarios", "Comprovantes bancarios"),
+    ("comprovantes_bancarios", "Comprovantes bancários"),
     ("destino_final", "Destino final"),
     ("auditoria", "Auditoria"),
     ("ia_operacional", "IA Operacional e Auditoria de Gargalos"),
@@ -2430,18 +2436,18 @@ if menu == "orcamento":
     c5.metric("Saldo residual", format_currency_brl(saldo_residual_total))
     c6.metric("Rubricas críticas", int(rubricas_criticas))
 
-    st.markdown("### Sinalizacao inteligente de compras")
+    st.markdown("### Sinalização inteligente de compras")
     p1, p2, p3, p4 = st.columns(4)
-    p1.metric("Periodo da prestacao", f"{percentual_tempo_prestacao:.2f}%")
+    p1.metric("Período da prestação", f"{percentual_tempo_prestacao:.2f}%")
     p2.metric("Compras executadas", format_currency_brl(total_compras_periodo))
     p3.metric("Progresso das compras", f"{percentual_compras_global:.2f}%")
-    p4.metric("Eficiencia tempo x compras", f"{eficiencia_compras:.2f}%")
+    p4.metric("Eficiência tempo x compras", f"{eficiencia_compras:.2f}%")
     barra_tempo, barra_compras, sinal_risco = st.columns([2, 2, 1])
     with barra_tempo:
-        st.caption("Tempo decorrido: mar/2026 a mar/2027")
+        st.caption("Tempo decorrido: mar/2026 até mar/2027")
         st.progress(min(max(percentual_tempo_prestacao / 100.0, 0), 1))
     with barra_compras:
-        st.caption("Execucao financeira por compras registradas")
+        st.caption("Execução financeira por compras registradas")
         st.progress(min(max(percentual_compras_global / 100.0, 0), 1))
     with sinal_risco:
         st.caption("Risco do prazo")
@@ -2470,7 +2476,7 @@ if menu == "orcamento":
             for _, rubrica in alertas.iterrows():
                 st.write(
                     f"{rubrica['codigo']} - {rubrica['nome']}: "
-                    f"{rubrica['status_financeiro']} "
+                    f"{descrever_status_financeiro(rubrica['status_financeiro'])} "
                     f"({format_currency_brl_markdown(rubrica['saldo_disponivel'])} operacional)"
                 )
 
@@ -2483,7 +2489,7 @@ if menu == "orcamento":
         "valor_reservado": "Valor reservado",
         "valor_utilizado": "Valor utilizado",
         "valor_compras_periodo": "Compras executadas",
-        "percentual_compras_periodo": "Progresso compras",
+        "percentual_compras_periodo": "Progresso das compras",
         "sinal_prazo": "Sinal prazo",
         "risco_prazo": "Risco prazo",
         "reserva_tecnica": "Reserva técnica",
@@ -2496,7 +2502,7 @@ if menu == "orcamento":
         "risco": "Risco",
     })
     df_orcamento["Índice comprometido"] = pd.to_numeric(df_orcamento["Índice comprometido"], errors="coerce").fillna(0)
-    df_orcamento["Progresso compras"] = pd.to_numeric(df_orcamento["Progresso compras"], errors="coerce").fillna(0)
+    df_orcamento["Progresso das compras"] = pd.to_numeric(df_orcamento["Progresso das compras"], errors="coerce").fillna(0)
     for coluna in [
         "Valor orçado",
         "Valor reservado",
@@ -2509,6 +2515,7 @@ if menu == "orcamento":
     ]:
         df_orcamento[coluna] = df_orcamento[coluna].apply(format_currency_brl)
     df_orcamento["Percentual utilizado"] = df_orcamento["Percentual utilizado"].apply(format_percent_brl)
+    df_orcamento["Status financeiro"] = df_orcamento["Status financeiro"].apply(descrever_status_financeiro)
     risco_labels = df_orcamento["Risco"].copy()
     risco_prazo_labels = df_orcamento["Risco prazo"].copy()
     df_orcamento["Risco"] = "●"
@@ -2522,7 +2529,7 @@ if menu == "orcamento":
         "Valor reservado",
         "Valor utilizado",
         "Compras executadas",
-        "Progresso compras",
+        "Progresso das compras",
         "Sinal prazo",
         "Reserva técnica",
         "Mínimo operacional",
@@ -2569,8 +2576,8 @@ if menu == "orcamento":
                 min_value=0,
                 max_value=100,
             ),
-            "Progresso compras": st.column_config.ProgressColumn(
-                "Progresso compras",
+            "Progresso das compras": st.column_config.ProgressColumn(
+                "Progresso das compras",
                 format="%.2f%%",
                 min_value=0,
                 max_value=100,
