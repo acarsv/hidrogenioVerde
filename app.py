@@ -2419,6 +2419,8 @@ if menu == "orcamento":
     total_orcado = df.valor_orcado.sum()
     total_reservado = df.valor_reservado.sum()
     total_utilizado = df.valor_utilizado.sum()
+    total_reserva_tecnica = df.reserva_tecnica.sum()
+    diferenca_sem_reserva_tecnica = total_orcado - total_reservado - total_utilizado
     total_disponivel = df.saldo_disponivel.sum()
     total_compras_periodo = df.valor_compras_periodo.sum()
     percentual_compras_global = round((float(total_compras_periodo) * 100.0 / float(total_orcado)), 2) if float(total_orcado or 0) > 0 else 0
@@ -2435,6 +2437,9 @@ if menu == "orcamento":
     c4.metric("Disponível operacional", format_currency_brl(total_disponivel))
     c5.metric("Saldo residual", format_currency_brl(saldo_residual_total))
     c6.metric("Rubricas críticas", int(rubricas_criticas))
+    c7, c8 = st.columns(2)
+    c7.metric("Diferença sem reserva técnica", format_currency_brl(diferenca_sem_reserva_tecnica))
+    c8.metric("Reserva técnica", format_currency_brl(total_reserva_tecnica))
 
     st.markdown("### Sinalização inteligente de compras")
     p1, p2, p3, p4 = st.columns(4)
