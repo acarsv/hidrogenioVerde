@@ -960,8 +960,13 @@ def ensure_permissions_schema():
 
     execute("""
     update usuarios_app
-    set permissoes = array['orcamento','nova_exigencia','solicitacoes','cotacoes','compra_nota','destino_final','auditoria','ia_operacional','itens_comprados','membros']
+    set permissoes = array['orcamento','nova_exigencia','solicitacoes','cotacoes','compra_nota','comprovantes_bancarios','destino_final','auditoria','ia_operacional','itens_comprados','membros']
     where papel = 'admin' and (permissoes is null or cardinality(permissoes) = 0)
+    """)
+    execute("""
+    update usuarios_app
+    set permissoes = array_append(permissoes, 'comprovantes_bancarios')
+    where papel = 'admin' and not ('comprovantes_bancarios' = any(permissoes))
     """)
 
 def hash_password(password: str) -> str:
@@ -2128,6 +2133,7 @@ BASE_MENU_OPTIONS = [
     ("solicitacoes", "Solicitações"),
     ("cotacoes", "Cotações"),
     ("compra_nota", "Compra e nota fiscal"),
+    ("comprovantes_bancarios", "Comprovantes bancarios"),
     ("destino_final", "Destino final"),
     ("auditoria", "Auditoria"),
     ("ia_operacional", "IA Operacional e Auditoria de Gargalos"),
@@ -3574,6 +3580,242 @@ elif menu == "compra_nota":
                     execute("update solicitacoes_compra set status='finalizado' where id=%s", (int(solicitacao_finalizada_id),))
                 sincronizar_orcamento()
                 st.success("Compra e nota fiscal finalizadas.")
+                st.rerun()
+
+elif menu == "comprovantes_bancarios":
+    compras_comprovante = query("""
+    select
+      c.id as compra_id,
+      s.id as solicitacao_id,
+      r.codigo as rubrica,
+      r.nome as rubrica_nome,
+      coalesce(co.fornecedor, '-') as fornecedor,
+      c.valor_compra,
+      c.comprado_em,
+      s.status
+    from compras c
+    join solicitacoes_compra s on s.id = c.solicitacao_id
+    join rubricas r on r.id = s.rubrica_id
+    left join cotacoes co on co.id = c.cotacao_vencedora_id
+    order by c.comprado_em desc, c.id desc
+    """)
+    if len(compras_comprovante) == 0:
+        st.info("Registre uma compra antes de enviar comprovantes bancarios.")
+        st.stop()
+
+    compra_id = st.selectbox(
+        "Compra",
+        compras_comprovante["compra_id"].tolist(),
+        format_func=lambda valor: (
+            f"Compra #{int(valor)} - "
+            f"Solicitacao #{int(compras_comprovante.loc[compras_comprovante.compra_id == valor, 'solicitacao_id'].iloc[0])} - "
+            f"{compras_comprovante.loc[compras_comprovante.compra_id == valor, 'rubrica'].iloc[0]} - "
+            f"{compras_comprovante.loc[compras_comprovante.compra_id == valor, 'fornecedor'].iloc[0]} - "
+            f"{format_currency_brl(compras_comprovante.loc[compras_comprovante.compra_id == valor, 'valor_compra'].iloc[0])}"
+        ),
+        key="comprovantes_menu_compra",
+    )
+    compra_comprovante = compras_comprovante[compras_comprovante["compra_id"] == compra_id].iloc[0]
+    fornecedor_comprovante_padrao = str(compra_comprovante["fornecedor"] or "")
+    st.caption(
+        f"Rubrica {compra_comprovante['rubrica']} - {compra_comprovante['rubrica_nome']} | "
+        f"Status: {normalizar_texto_portugues(compra_comprovante['status'])}"
+    )
+
+    notas_comprovante = query("""
+    select id, numero_nf, fornecedor, valor_nf
+    from notas_fiscais
+    where compra_id=%s
+    order by lancado_em desc, id desc
+    """, (int(compra_id),))
+    comprovantes_salvos = comprovantes_bancarios_df(compra_id)
+    if len(comprovantes_salvos):
+        st.metric("Comprovantes vinculados", len(comprovantes_salvos))
+        exibir_comprovantes_bancarios(compra_id)
+    else:
+        st.info("Esta compra ainda nao tem comprovante bancario.")
+
+    modo_comprovante = st.radio(
+        "Acao",
+        ["Carregar novo comprovante", "Editar comprovante existente"],
+        horizontal=True,
+        key=f"comprovante_modo_{compra_id}",
+    )
+
+    nota_opcoes = [None] + notas_comprovante["id"].tolist() if len(notas_comprovante) else [None]
+    def label_nota_comprovante(valor):
+        if valor is None:
+            return "Sem NF vinculada"
+        return (
+            f"NF {notas_comprovante.loc[notas_comprovante.id == valor, 'numero_nf'].iloc[0]} - "
+            f"{notas_comprovante.loc[notas_comprovante.id == valor, 'fornecedor'].iloc[0]} - "
+            f"{format_currency_brl(notas_comprovante.loc[notas_comprovante.id == valor, 'valor_nf'].iloc[0])}"
+        )
+
+    pasta_comprovante_atual = ""
+    if len(comprovantes_salvos):
+        pasta_comprovante_atual = str(comprovantes_salvos.iloc[0]["pasta_google_drive_link"] or "").strip()
+
+    if modo_comprovante == "Carregar novo comprovante":
+        st.markdown("### Carregar comprovante bancario")
+        nota_id = st.selectbox(
+            "Nota fiscal vinculada",
+            nota_opcoes,
+            format_func=label_nota_comprovante,
+            key=f"comprovante_menu_nota_novo_{compra_id}",
+        )
+        arquivo_comprovante = st.file_uploader(
+            "Arquivo do comprovante bancario",
+            type=["pdf", "png", "jpg", "jpeg"],
+            key=f"comprovante_menu_arquivo_novo_{compra_id}",
+        )
+        link_pasta = st.text_input(
+            "Link da pasta de comprovantes no Google Drive",
+            value=pasta_comprovante_atual,
+            key=f"comprovante_menu_pasta_novo_{compra_id}",
+        )
+        observacao = st.text_area("Observacao", key=f"comprovante_menu_obs_novo_{compra_id}")
+        if st.button("Enviar comprovante bancario", type="primary", use_container_width=True, key=f"comprovante_menu_salvar_novo_{compra_id}"):
+            if arquivo_comprovante is None:
+                st.error("Anexe o comprovante bancario.")
+            else:
+                if nota_id is not None and len(notas_comprovante):
+                    fornecedor_upload = str(notas_comprovante.loc[notas_comprovante.id == nota_id, "fornecedor"].iloc[0] or "")
+                else:
+                    fornecedor_upload = fornecedor_comprovante_padrao
+                try:
+                    upload_comprovante = upload_comprovante_bancario_google_drive(
+                        arquivo_comprovante,
+                        int(compra_id),
+                        fornecedor=fornecedor_upload,
+                        pasta_url=str(link_pasta or "").strip(),
+                    )
+                except RuntimeError as exc:
+                    st.error(str(exc))
+                    st.stop()
+                execute("""
+                insert into comprovantes_bancarios (
+                    compra_id,
+                    nota_fiscal_id,
+                    google_drive_file_id,
+                    google_drive_link,
+                    pasta_google_drive_link,
+                    nome_arquivo,
+                    mime_type,
+                    tamanho_bytes,
+                    observacao,
+                    enviado_por
+                ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (
+                    int(compra_id),
+                    int(nota_id) if nota_id is not None else None,
+                    upload_comprovante["file_id"],
+                    upload_comprovante["file_link"],
+                    upload_comprovante["folder_link"],
+                    upload_comprovante["nome_arquivo"],
+                    upload_comprovante["mime_type"],
+                    upload_comprovante["tamanho_bytes"],
+                    observacao.strip() or None,
+                    user["id"],
+                ))
+                st.success("Comprovante bancario enviado.")
+                st.rerun()
+    else:
+        st.markdown("### Editar comprovante existente")
+        if len(comprovantes_salvos) == 0:
+            st.info("Nao ha comprovante salvo para editar nesta compra.")
+        else:
+            comprovante_id = st.selectbox(
+                "Comprovante",
+                comprovantes_salvos["id"].tolist(),
+                format_func=lambda valor: (
+                    f"{comprovantes_salvos.loc[comprovantes_salvos.id == valor, 'nome_arquivo'].iloc[0]} - "
+                    f"{comprovantes_salvos.loc[comprovantes_salvos.id == valor, 'criado_em'].iloc[0]}"
+                ),
+                key=f"comprovante_menu_editar_id_{compra_id}",
+            )
+            comprovante = comprovantes_salvos[comprovantes_salvos["id"] == comprovante_id].iloc[0]
+            if str(comprovante["google_drive_link"] or "").strip():
+                st.link_button("Abrir comprovante atual", str(comprovante["google_drive_link"]).strip())
+            nota_atual = int(comprovante["nota_fiscal_id"]) if comprovante["nota_fiscal_id"] is not None and not pd.isna(comprovante["nota_fiscal_id"]) else None
+            nota_id = st.selectbox(
+                "Nota fiscal vinculada",
+                nota_opcoes,
+                index=nota_opcoes.index(nota_atual) if nota_atual in nota_opcoes else 0,
+                format_func=label_nota_comprovante,
+                key=f"comprovante_menu_nota_editar_{comprovante_id}",
+            )
+            arquivo_comprovante = st.file_uploader(
+                "Substituir arquivo do comprovante bancario",
+                type=["pdf", "png", "jpg", "jpeg"],
+                key=f"comprovante_menu_arquivo_editar_{comprovante_id}",
+            )
+            link_pasta = st.text_input(
+                "Link da pasta de comprovantes no Google Drive",
+                value=str(comprovante["pasta_google_drive_link"] or ""),
+                key=f"comprovante_menu_pasta_editar_{comprovante_id}",
+            )
+            observacao = st.text_area(
+                "Observacao",
+                value=str(comprovante["observacao"] or ""),
+                key=f"comprovante_menu_obs_editar_{comprovante_id}",
+            )
+            if st.button("Salvar alteracoes do comprovante", type="primary", use_container_width=True, key=f"comprovante_menu_salvar_editar_{comprovante_id}"):
+                if arquivo_comprovante is not None:
+                    if nota_id is not None and len(notas_comprovante):
+                        fornecedor_upload = str(notas_comprovante.loc[notas_comprovante.id == nota_id, "fornecedor"].iloc[0] or "")
+                    else:
+                        fornecedor_upload = fornecedor_comprovante_padrao
+                    try:
+                        upload_comprovante = upload_comprovante_bancario_google_drive(
+                            arquivo_comprovante,
+                            int(compra_id),
+                            fornecedor=fornecedor_upload,
+                            pasta_url=str(link_pasta or "").strip(),
+                        )
+                    except RuntimeError as exc:
+                        st.error(str(exc))
+                        st.stop()
+                    execute("""
+                    update comprovantes_bancarios
+                    set nota_fiscal_id=%s,
+                        google_drive_file_id=%s,
+                        google_drive_link=%s,
+                        pasta_google_drive_link=%s,
+                        nome_arquivo=%s,
+                        mime_type=%s,
+                        tamanho_bytes=%s,
+                        observacao=%s,
+                        enviado_por=%s
+                    where id=%s
+                    """, (
+                        int(nota_id) if nota_id is not None else None,
+                        upload_comprovante["file_id"],
+                        upload_comprovante["file_link"],
+                        upload_comprovante["folder_link"],
+                        upload_comprovante["nome_arquivo"],
+                        upload_comprovante["mime_type"],
+                        upload_comprovante["tamanho_bytes"],
+                        observacao.strip() or None,
+                        user["id"],
+                        int(comprovante_id),
+                    ))
+                else:
+                    execute("""
+                    update comprovantes_bancarios
+                    set nota_fiscal_id=%s,
+                        pasta_google_drive_link=coalesce(nullif(%s, ''), pasta_google_drive_link),
+                        observacao=%s,
+                        enviado_por=%s
+                    where id=%s
+                    """, (
+                        int(nota_id) if nota_id is not None else None,
+                        str(link_pasta or "").strip(),
+                        observacao.strip() or None,
+                        user["id"],
+                        int(comprovante_id),
+                    ))
+                st.success("Comprovante bancario atualizado.")
                 st.rerun()
 
 elif menu == "destino_final":
