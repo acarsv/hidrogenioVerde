@@ -947,8 +947,9 @@ def ensure_financial_governance_schema():
     from rubricas r
     where r.ativo = true
     """)
-    execute("drop view if exists vw_auditoria_itens_projeto")
     execute("""
+    select pg_advisory_lock(2026052601);
+    drop view if exists vw_auditoria_itens_projeto;
     create view vw_auditoria_itens_projeto as
     with cotacao_resumo as (
         select
@@ -1087,7 +1088,8 @@ def ensure_financial_governance_schema():
     left join cotacao_resumo cr on cr.pedido_item_id = pi.id
     left join nota_resumo nr on nr.pedido_item_id = pi.id
     left join comprovante_resumo cbr on cbr.compra_id = c.id
-    left join destino_resumo dr on dr.pedido_item_id = pi.id
+    left join destino_resumo dr on dr.pedido_item_id = pi.id;
+    select pg_advisory_unlock(2026052601);
     """)
 
 def ensure_permissions_schema():
