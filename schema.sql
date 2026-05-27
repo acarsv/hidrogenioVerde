@@ -150,6 +150,9 @@ create table if not exists movimentacoes_orcamento (
   operacao text not null,
   valor numeric(14,2) not null default 0,
   justificativa text,
+  remanejamento_id text,
+  estornado_em timestamptz,
+  estornado_por uuid references usuarios_app(id),
   criado_em timestamptz not null default now()
 );
 

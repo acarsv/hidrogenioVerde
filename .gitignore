@@ -1,4 +1,6 @@
 .env
+client_secret.json
+token_drive_output.txt
 .venv
 __pycache__
 streamlit.err.log

@@ -2,9 +2,10 @@ import os
 import mimetypes
 import re
 import json
+from uuid import uuid4
 from io import BytesIO
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import bcrypt
 import pandas as pd
 import psycopg2
@@ -914,9 +915,18 @@ def ensure_financial_governance_schema():
       operacao text not null,
       valor numeric(14,2) not null default 0,
       justificativa text,
+      remanejamento_id text,
+      estornado_em timestamptz,
+      estornado_por uuid references usuarios_app(id),
       criado_em timestamptz not null default now()
     )
     """)
+    if not has_column("movimentacoes_orcamento", "remanejamento_id"):
+        execute("alter table movimentacoes_orcamento add column remanejamento_id text")
+    if not has_column("movimentacoes_orcamento", "estornado_em"):
+        execute("alter table movimentacoes_orcamento add column estornado_em timestamptz")
+    if not has_column("movimentacoes_orcamento", "estornado_por"):
+        execute("alter table movimentacoes_orcamento add column estornado_por uuid references usuarios_app(id)")
 
     execute("""
     create or replace view vw_orcamento as
@@ -1376,6 +1386,74 @@ def excede_saldo_disponivel(rubrica_id: int, valor: Decimal) -> tuple[bool, Deci
     saldo = Decimal(str(saldo_df.iloc[0]["saldo_disponivel"])) if len(saldo_df) == 1 else Decimal("0")
     return valor > saldo, saldo
 
+CENTAVO = Decimal("0.01")
+
+def arredondar_centavos(valor):
+    return Decimal(str(valor)).quantize(CENTAVO, rounding=ROUND_HALF_UP)
+
+def calcular_reserva_tecnica(valor_orcado, reserva_percentual):
+    valor_orcado = Decimal(str(valor_orcado))
+    reserva_percentual = Decimal(str(reserva_percentual or 0))
+    return arredondar_centavos(valor_orcado * reserva_percentual / Decimal("100"))
+
+def saldo_operacional_calculado(valor_orcado, reserva_percentual, valor_reservado=0, valor_utilizado=0):
+    valor_orcado = Decimal(str(valor_orcado))
+    valor_reservado = Decimal(str(valor_reservado or 0))
+    valor_utilizado = Decimal(str(valor_utilizado or 0))
+    return (
+        valor_orcado
+        - calcular_reserva_tecnica(valor_orcado, reserva_percentual)
+        - valor_reservado
+        - valor_utilizado
+    )
+
+def valor_orcado_para_reduzir_saldo_operacional(
+    valor_operacional,
+    valor_orcado_atual,
+    reserva_percentual,
+    saldo_operacional_atual=None,
+    valor_reservado=0,
+    valor_utilizado=0,
+):
+    valor_operacional = arredondar_centavos(valor_operacional)
+    valor_orcado_atual = Decimal(str(valor_orcado_atual))
+    reserva_percentual = Decimal(str(reserva_percentual or 0))
+    valor_reservado = Decimal(str(valor_reservado or 0))
+    valor_utilizado = Decimal(str(valor_utilizado or 0))
+    fator_disponivel = Decimal("1") - (reserva_percentual / Decimal("100"))
+    if fator_disponivel <= 0:
+        raise ValueError("A reserva tecnica da rubrica impede calcular o remanejamento.")
+
+    valor_orcado = arredondar_centavos(valor_operacional / fator_disponivel)
+    if saldo_operacional_atual is None:
+        saldo_atual = saldo_operacional_calculado(
+            valor_orcado_atual,
+            reserva_percentual,
+            valor_reservado,
+            valor_utilizado,
+        )
+    else:
+        saldo_atual = Decimal(str(saldo_operacional_atual))
+    if valor_operacional >= saldo_atual:
+        saldo_alvo = Decimal("0")
+    else:
+        saldo_alvo = saldo_atual - valor_operacional
+
+    def saldo_apos_reducao(reducao):
+        return saldo_operacional_calculado(
+            valor_orcado_atual - reducao,
+            reserva_percentual,
+            valor_reservado,
+            valor_utilizado,
+        )
+
+    while saldo_apos_reducao(valor_orcado) > saldo_alvo and valor_orcado < valor_orcado_atual:
+        valor_orcado += CENTAVO
+    while valor_orcado > CENTAVO and saldo_apos_reducao(valor_orcado - CENTAVO) <= saldo_alvo:
+        valor_orcado -= CENTAVO
+
+    return arredondar_centavos(valor_orcado)
+
 def parse_responsaveis(value) -> list[str]:
     if value is None or pd.isna(value):
         return []
@@ -1570,7 +1648,7 @@ def atualizar_responsaveis_dialog():
 @st.dialog("Remanejar saldo")
 def remanejar_saldo_dialog(usuario_id):
     rubricas = query("""
-    select id, codigo, nome, saldo_disponivel
+    select id, codigo, nome, valor_orcado, valor_reservado, valor_utilizado, reserva_tecnica_percentual, saldo_disponivel
     from vw_orcamento
     where encerrada = false
     order by codigo
@@ -1585,9 +1663,11 @@ def remanejar_saldo_dialog(usuario_id):
 
     origem_id = st.selectbox("Rubrica origem", rubricas["id"].tolist(), format_func=label_rubrica)
     destino_id = st.selectbox("Rubrica destino", rubricas["id"].tolist(), format_func=label_rubrica)
-    saldo_origem = Decimal(str(rubricas.loc[rubricas.id == origem_id, "saldo_disponivel"].iloc[0]))
+    rubrica_origem = rubricas.loc[rubricas.id == origem_id].iloc[0]
+    saldo_origem = Decimal(str(rubrica_origem["saldo_disponivel"]))
     valor_maximo = float(max(saldo_origem, Decimal("0.01")))
-    valor = st.number_input("Valor", min_value=0.01, max_value=valor_maximo, value=0.01, step=100.0)
+    valor = st.number_input("Valor operacional a remanejar", min_value=0.01, max_value=valor_maximo, value=0.01, step=100.0)
+    st.caption("O valor informado e abatido do disponivel operacional. O sistema ajusta o valor orcado considerando a reserva tecnica.")
     justificativa = st.text_area("Justificativa formal")
 
     c1, c2 = st.columns(2)
@@ -1600,18 +1680,184 @@ def remanejar_saldo_dialog(usuario_id):
         elif not justificativa.strip():
             st.error("Informe uma justificativa para auditoria.")
         else:
-            execute("update rubricas set valor_orcado = valor_orcado - %s where id = %s", (valor_decimal, int(origem_id)))
-            execute("update rubricas set valor_orcado = valor_orcado + %s where id = %s", (valor_decimal, int(destino_id)))
+            remanejamento_id = str(uuid4())
+            valor_orcado_movimentado = valor_orcado_para_reduzir_saldo_operacional(
+                valor_decimal,
+                rubrica_origem["valor_orcado"],
+                rubrica_origem["reserva_tecnica_percentual"],
+                rubrica_origem["saldo_disponivel"],
+                rubrica_origem["valor_reservado"],
+                rubrica_origem["valor_utilizado"],
+            )
+            justificativa_auditoria = (
+                f"{justificativa.strip()} | Valor operacional informado: {format_currency_brl(valor_decimal)}. "
+                f"Valor orcado movimentado com reserva tecnica: {format_currency_brl(valor_orcado_movimentado)}."
+            )
+            execute("update rubricas set valor_orcado = valor_orcado - %s where id = %s", (valor_orcado_movimentado, int(origem_id)))
+            execute("update rubricas set valor_orcado = valor_orcado + %s where id = %s", (valor_orcado_movimentado, int(destino_id)))
             execute(
-                "insert into movimentacoes_orcamento (rubrica_id, usuario_id, operacao, valor, justificativa) values (%s,%s,'remanejamento_saida',%s,%s)",
-                (int(origem_id), usuario_id, valor_decimal, justificativa),
+                """
+                insert into movimentacoes_orcamento
+                  (rubrica_id, usuario_id, operacao, valor, justificativa, remanejamento_id)
+                values (%s,%s,'remanejamento_saida',%s,%s,%s)
+                """,
+                (int(origem_id), usuario_id, valor_orcado_movimentado, justificativa_auditoria, remanejamento_id),
             )
             execute(
-                "insert into movimentacoes_orcamento (rubrica_id, usuario_id, operacao, valor, justificativa) values (%s,%s,'remanejamento_entrada',%s,%s)",
-                (int(destino_id), usuario_id, valor_decimal, justificativa),
+                """
+                insert into movimentacoes_orcamento
+                  (rubrica_id, usuario_id, operacao, valor, justificativa, remanejamento_id)
+                values (%s,%s,'remanejamento_entrada',%s,%s,%s)
+                """,
+                (int(destino_id), usuario_id, valor_orcado_movimentado, justificativa_auditoria, remanejamento_id),
             )
             st.success("Remanejamento registrado.")
             st.rerun()
+    if c2.button("Cancelar", use_container_width=True):
+        st.rerun()
+
+def voltar_remanejamento(remanejamento_id, usuario_id, justificativa_retorno):
+    conn = get_conn()
+    conn.autocommit = False
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+            select
+              saida.id as saida_id,
+              entrada.id as entrada_id,
+              saida.rubrica_id as origem_id,
+              entrada.rubrica_id as destino_id,
+              saida.valor,
+              saida.justificativa
+            from movimentacoes_orcamento saida
+            join movimentacoes_orcamento entrada
+              on entrada.remanejamento_id = saida.remanejamento_id
+             and entrada.operacao = 'remanejamento_entrada'
+            where saida.remanejamento_id=%s
+              and saida.operacao = 'remanejamento_saida'
+              and saida.estornado_em is null
+              and entrada.estornado_em is null
+            for update
+            """, (remanejamento_id,))
+            remanejamento = cur.fetchone()
+            if not remanejamento:
+                raise ValueError("Remanejamento nao encontrado ou ja estornado.")
+
+            valor = Decimal(str(remanejamento["valor"]))
+            origem_id = int(remanejamento["origem_id"])
+            destino_id = int(remanejamento["destino_id"])
+
+            cur.execute("""
+            select id, valor_orcado, valor_reservado, valor_utilizado, reserva_tecnica_percentual
+            from rubricas
+            where id in (%s, %s)
+            order by id
+            for update
+            """, (origem_id, destino_id))
+            rubricas_travadas = {int(row["id"]): row for row in cur.fetchall()}
+            if origem_id not in rubricas_travadas or destino_id not in rubricas_travadas:
+                raise ValueError("Rubrica de destino nao encontrada.")
+            rubrica_destino = rubricas_travadas[destino_id]
+            saldo_destino_apos_retorno = saldo_operacional_calculado(
+                Decimal(str(rubrica_destino["valor_orcado"])) - valor,
+                rubrica_destino["reserva_tecnica_percentual"],
+                rubrica_destino["valor_reservado"],
+                rubrica_destino["valor_utilizado"],
+            )
+            if saldo_destino_apos_retorno < 0:
+                raise ValueError(
+                    "A rubrica que recebeu o remanejamento nao tem saldo operacional suficiente para devolver."
+                )
+
+            cur.execute("update rubricas set valor_orcado = valor_orcado - %s where id = %s", (valor, destino_id))
+            cur.execute("update rubricas set valor_orcado = valor_orcado + %s where id = %s", (valor, origem_id))
+            cur.execute("""
+            update movimentacoes_orcamento
+            set estornado_em=now(), estornado_por=%s
+            where id in (%s, %s)
+            """, (usuario_id, int(remanejamento["saida_id"]), int(remanejamento["entrada_id"])))
+            justificativa_auditoria = (
+                f"Estorno do remanejamento {remanejamento_id}. "
+                f"Justificativa original: {remanejamento['justificativa'] or '-'} "
+                f"Justificativa do retorno: {justificativa_retorno}"
+            )
+            cur.execute("""
+            insert into movimentacoes_orcamento
+              (rubrica_id, usuario_id, operacao, valor, justificativa, remanejamento_id)
+            values (%s,%s,'retorno_remanejamento_saida',%s,%s,%s)
+            """, (destino_id, usuario_id, valor, justificativa_auditoria, remanejamento_id))
+            cur.execute("""
+            insert into movimentacoes_orcamento
+              (rubrica_id, usuario_id, operacao, valor, justificativa, remanejamento_id)
+            values (%s,%s,'retorno_remanejamento_entrada',%s,%s,%s)
+            """, (origem_id, usuario_id, valor, justificativa_auditoria, remanejamento_id))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+@st.dialog("Voltar remanejamento")
+def voltar_remanejamento_dialog(usuario_id):
+    remanejamentos = query("""
+    select
+      saida.remanejamento_id,
+      saida.criado_em,
+      origem.codigo as origem_codigo,
+      origem.nome as origem_nome,
+      destino.codigo as destino_codigo,
+      destino.nome as destino_nome,
+      saida.valor,
+      saida.justificativa
+    from movimentacoes_orcamento saida
+    join movimentacoes_orcamento entrada
+      on entrada.remanejamento_id = saida.remanejamento_id
+     and entrada.operacao = 'remanejamento_entrada'
+    join rubricas origem on origem.id = saida.rubrica_id
+    join rubricas destino on destino.id = entrada.rubrica_id
+    where saida.operacao = 'remanejamento_saida'
+      and saida.remanejamento_id is not null
+      and saida.estornado_em is null
+      and entrada.estornado_em is null
+    order by saida.criado_em desc, saida.id desc
+    """)
+    if len(remanejamentos) == 0:
+        st.info("Nao ha remanejamentos rastreaveis em aberto para voltar.")
+        return
+
+    remanejamento_id = st.selectbox(
+        "Remanejamento",
+        remanejamentos["remanejamento_id"].tolist(),
+        format_func=lambda item_id: (
+            f"{remanejamentos.loc[remanejamentos.remanejamento_id == item_id, 'origem_codigo'].iloc[0]} -> "
+            f"{remanejamentos.loc[remanejamentos.remanejamento_id == item_id, 'destino_codigo'].iloc[0]} | "
+            f"{format_currency_brl(remanejamentos.loc[remanejamentos.remanejamento_id == item_id, 'valor'].iloc[0])}"
+        ),
+    )
+    selecionado = remanejamentos.loc[remanejamentos.remanejamento_id == remanejamento_id].iloc[0]
+    st.write(
+        f"Origem original: {selecionado['origem_codigo']} - {selecionado['origem_nome']} | "
+        f"Destino original: {selecionado['destino_codigo']} - {selecionado['destino_nome']}"
+    )
+    st.write(f"Valor a devolver: {format_currency_brl(selecionado['valor'])}")
+    st.caption(f"Justificativa original: {selecionado['justificativa'] or '-'}")
+    st.warning("A volta retira o valor da rubrica destino original e devolve para a rubrica origem original.")
+    justificativa = st.text_area("Justificativa da volta")
+
+    c1, c2 = st.columns(2)
+    if c1.button("Confirmar volta", type="primary", use_container_width=True):
+        if not justificativa.strip():
+            st.error("Informe uma justificativa para auditoria.")
+        else:
+            try:
+                voltar_remanejamento(remanejamento_id, usuario_id, justificativa.strip())
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.success("Remanejamento voltou para a rubrica de origem.")
+                st.rerun()
     if c2.button("Cancelar", use_container_width=True):
         st.rerun()
 
@@ -2367,7 +2613,7 @@ st.markdown(
 
 if menu == "orcamento":
     if user["papel"] in ["admin", "gerente"]:
-        c_recalcular, c_responsaveis, c_reservar, c_remanejar, c_encerrar, c_historico = st.columns(6)
+        c_recalcular, c_responsaveis, c_reservar, c_remanejar, c_voltar_remanejamento, c_encerrar, c_historico = st.columns(7)
         if c_recalcular.button("Recalcular orçamento"):
             sincronizar_orcamento()
             st.success("Orçamento recalculado com base nas compras existentes.")
@@ -2378,6 +2624,8 @@ if menu == "orcamento":
             reservar_valor_dialog(user["id"])
         if c_remanejar.button("Remanejar saldo"):
             remanejar_saldo_dialog(user["id"])
+        if c_voltar_remanejamento.button("Voltar remanej."):
+            voltar_remanejamento_dialog(user["id"])
         if c_encerrar.button("Encerrar rubrica"):
             encerrar_rubrica_dialog(user["id"])
         if c_historico.button("Histórico/Auditoria"):
