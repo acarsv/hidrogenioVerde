@@ -2718,7 +2718,7 @@ if menu == "orcamento":
     c7, c8, c9 = st.columns(3)
     c7.metric("Diferença sem reserva técnica", format_currency_brl(diferenca_sem_reserva_tecnica))
     c8.metric("Reserva técnica", format_currency_brl(total_reserva_tecnica))
-    c9.empty()
+    c9.metric("Total residual", format_currency_brl(saldo_residual_total))
 
     st.markdown("### Sinalização inteligente de compras")
     p1, p2, p3, p4 = st.columns(4)
