@@ -190,7 +190,6 @@ select
     ) < r.valor_minimo_operacional
     then (
       r.valor_orcado
-      - round((r.valor_orcado * r.reserva_tecnica_percentual / 100.0), 2)
       - r.valor_reservado
       - r.valor_utilizado
     )
