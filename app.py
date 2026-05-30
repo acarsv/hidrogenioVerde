@@ -3041,6 +3041,11 @@ elif menu == "solicitacoes":
             valor_estimado = Decimal(str(linha["Valor estimado"]))
             quantidade_original = Decimal("0") if pd.isna(original["quantidade"]) else Decimal(str(original["quantidade"]))
             valor_original = Decimal("0") if pd.isna(original["Valor estimado"]) else Decimal(str(original["Valor estimado"]))
+            quantidade_alterada = quantidade != quantidade_original
+            valor_alterado = valor_estimado != valor_original
+            if quantidade_alterada and not valor_alterado and quantidade_original > 0:
+                valor_unitario_original = valor_original / quantidade_original
+                valor_estimado = (valor_unitario_original * quantidade).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             if quantidade != quantidade_original or valor_estimado != valor_original:
                 alteracoes.append((solicitacao_id, quantidade, valor_estimado, quantidade_original, valor_original))
 
