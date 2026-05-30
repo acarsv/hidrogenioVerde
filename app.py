@@ -3526,8 +3526,11 @@ elif menu == "cotacoes":
                             )
                             arquivo_url_final = upload_resultado["folder_link"]
                         except RuntimeError as exc:
-                            st.error(str(exc))
-                            st.stop()
+                            st.warning(
+                                "Nao foi possivel enviar o arquivo ao Google Drive. "
+                                "A cotacao sera salva sem anexo; depois atualize o token do Drive e edite a cotacao para anexar novamente. "
+                                f"Detalhe: {exc}"
+                            )
                     item_ancora_id = itens_editados.iloc[0]["pedido_item_id"]
                     solicitacao_ancora_id = int(cotacao_atual.get("solicitacao_id") or pedido_itens.loc[pedido_itens.id == item_ancora_id, "pedido_id"].iloc[0])
                     cotacao_id_atual = cotacao_atual.get("id")
