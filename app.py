@@ -2943,13 +2943,11 @@ elif menu == "nova_exigencia":
     st.markdown("### Itens do pedido")
     itens_state_key = f"nova_exigencia_itens_dados_{form_version}_{rubrica_id}"
     itens_auto_desc_key = f"nova_exigencia_item_auto_desc_{form_version}_{rubrica_id}"
-    itens_editor_version_key = f"nova_exigencia_itens_editor_version_{form_version}_{rubrica_id}"
+    itens_editor_key = f"nova_exigencia_itens_{form_version}_{rubrica_id}"
     if itens_state_key not in st.session_state:
         st.session_state[itens_state_key] = [
             {"descricao": "", "tipo_item": tipo_item_padrao, "quantidade": 1.0, "valor_unitario": 0.0, "observacoes": ""}
         ]
-    if itens_editor_version_key not in st.session_state:
-        st.session_state[itens_editor_version_key] = 0
 
     descricao_auto = descricao.strip()
     itens_estado = list(st.session_state[itens_state_key])
@@ -2961,7 +2959,6 @@ elif menu == "nova_exigencia":
         itens_estado[0]["descricao"] = descricao_auto
         st.session_state[itens_auto_desc_key] = descricao_auto
         st.session_state[itens_state_key] = itens_estado
-        st.session_state[itens_editor_version_key] += 1
 
     itens_base = pd.DataFrame(st.session_state[itens_state_key])
     itens_editados = st.data_editor(
@@ -2976,7 +2973,7 @@ elif menu == "nova_exigencia":
             "valor_unitario": st.column_config.NumberColumn("Valor unitario", min_value=0.0, format="R$ %.2f"),
             "observacoes": st.column_config.TextColumn("Observacoes"),
         },
-        key=f"nova_exigencia_itens_{form_version}_{rubrica_id}_{st.session_state[itens_editor_version_key]}",
+        key=itens_editor_key,
     )
     st.session_state[itens_state_key] = itens_editados.to_dict("records")
     itens_validos = itens_editados[itens_editados["descricao"].fillna("").str.strip() != ""].copy()
