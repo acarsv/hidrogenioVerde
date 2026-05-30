@@ -3012,13 +3012,81 @@ elif menu == "solicitacoes":
     where s.status not in ('finalizado','cancelado')
     order by s.id desc
     """)
-    st.dataframe(
-        df,
+    pode_editar_solicitacoes = user["papel"] in ["gerente", "admin"]
+    df_editor = df.copy()
+    if len(df_editor):
+        df_editor["quantidade"] = pd.to_numeric(df_editor["quantidade"], errors="coerce")
+        df_editor["Valor estimado"] = pd.to_numeric(df_editor["Valor estimado"], errors="coerce")
+    tabela_solicitacoes = st.data_editor(
+        df_editor,
         use_container_width=True,
+        disabled=["id", "rubrica", "descricao", "status", "autorizado", "criado_em"],
         column_config={
-            "Valor estimado": st.column_config.NumberColumn("Valor estimado", format="R$ %.2f"),
+            "quantidade": st.column_config.NumberColumn("quantidade", min_value=0.001, format="%.3f", disabled=not pode_editar_solicitacoes),
+            "Valor estimado": st.column_config.NumberColumn("Valor estimado", min_value=0.0, format="R$ %.2f", disabled=not pode_editar_solicitacoes),
         },
+        key="solicitacoes_editor",
     )
+    if pode_editar_solicitacoes and st.button("Salvar alteracoes da tabela", key="solicitacoes_salvar_tabela"):
+        alteracoes = []
+        original_por_id = df_editor.set_index("id")
+        valores_invalidos = False
+        for _, linha in tabela_solicitacoes.iterrows():
+            solicitacao_id = int(linha["id"])
+            original = original_por_id.loc[solicitacao_id]
+            if pd.isna(linha["quantidade"]) or pd.isna(linha["Valor estimado"]):
+                valores_invalidos = True
+                continue
+            quantidade = Decimal(str(linha["quantidade"]))
+            valor_estimado = Decimal(str(linha["Valor estimado"]))
+            quantidade_original = Decimal("0") if pd.isna(original["quantidade"]) else Decimal(str(original["quantidade"]))
+            valor_original = Decimal("0") if pd.isna(original["Valor estimado"]) else Decimal(str(original["Valor estimado"]))
+            if quantidade != quantidade_original or valor_estimado != valor_original:
+                alteracoes.append((solicitacao_id, quantidade, valor_estimado, quantidade_original, valor_original))
+
+        if valores_invalidos:
+            st.error("Preencha quantidade e valor estimado antes de salvar.")
+        elif not alteracoes:
+            st.info("Nenhuma alteracao para salvar.")
+        elif any(quantidade <= 0 for _, quantidade, _, _, _ in alteracoes):
+            st.error("A quantidade deve ser maior que zero.")
+        elif any(valor_estimado < 0 for _, _, valor_estimado, _, _ in alteracoes):
+            st.error("O valor estimado nao pode ser negativo.")
+        else:
+            for solicitacao_id, quantidade, valor_estimado, quantidade_original, valor_original in alteracoes:
+                execute("""
+                update solicitacoes_compra
+                set quantidade=%s, valor_estimado=%s, atualizado_em=now()
+                where id=%s
+                """, (quantidade, valor_estimado, solicitacao_id))
+                execute("""
+                update pedido_itens
+                set quantidade=%s,
+                    valor_unitario=%s
+                where pedido_id=%s
+                  and (select count(*) from pedido_itens where pedido_id=%s) = 1
+                """, (
+                    quantidade,
+                    (valor_estimado / quantidade).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+                    solicitacao_id,
+                    solicitacao_id,
+                ))
+                execute("""
+                insert into historico_status (solicitacao_id,status_novo,usuario_id,observacao)
+                values (%s,%s,%s,%s)
+                """, (
+                    solicitacao_id,
+                    str(df_editor.loc[df_editor["id"] == solicitacao_id, "status"].iloc[0]),
+                    user["id"],
+                    (
+                        "Quantidade/valor estimado editados na tabela: "
+                        f"quantidade {quantidade_original} -> {quantidade}; "
+                        f"valor {format_currency_brl(valor_original)} -> {format_currency_brl(valor_estimado)}"
+                    ),
+                ))
+            sincronizar_orcamento()
+            st.success(f"{len(alteracoes)} solicitacao(oes) atualizada(s).")
+            st.rerun()
     if user["papel"] in ["gerente", "admin"]:
         st.markdown("### Autorizar solicitação")
         if len(df) == 0:
