@@ -3399,6 +3399,32 @@ elif menu == "cotacoes":
             exibir_arquivos_cotacao(cotacao_atual.get("id"))
 
             st.markdown("### Adicionar item à cotação")
+            adicionar_todos = st.checkbox("Adicionar todos os itens autorizados desta rubrica", key=f"{prefixo}_adicionar_todos")
+            if adicionar_todos:
+                itens = list(st.session_state[f"{prefixo}_itens"])
+                itens_ja_adicionados = {int(item["pedido_item_id"]) for item in itens if item.get("pedido_item_id") is not None}
+                novos_itens = []
+                for _, item in pedido_itens.iterrows():
+                    pedido_item_id = int(item["id"])
+                    if pedido_item_id in itens_ja_adicionados:
+                        continue
+                    novos_itens.append({
+                        "linha_id": f"novo_{len(itens) + len(novos_itens) + 1}_{pedido_item_id}",
+                        "pedido_item_id": pedido_item_id,
+                        "Item": item["descricao"],
+                        "Tipo": item["tipo_item"],
+                        "Quantidade": float(item["quantidade"]),
+                        "Valor unitario": float(item["valor_unitario"] or 0),
+                        "Observacoes": "",
+                        "Remover": False,
+                    })
+                if novos_itens:
+                    st.session_state[f"{prefixo}_itens"] = itens + novos_itens
+                    st.session_state[f"{prefixo}_editor_version"] += 1
+                    st.success(f"{len(novos_itens)} item(ns) adicionado(s) a cotacao.")
+                    st.rerun()
+                else:
+                    st.info("Todos os itens autorizados desta rubrica ja estao na cotacao.")
             item_id = st.selectbox(
                 "Item da rubrica",
                 pedido_itens["id"].tolist(),
