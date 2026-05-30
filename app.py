@@ -2959,6 +2959,41 @@ elif menu == "nova_exigencia":
         itens_estado[0]["descricao"] = descricao_auto
         st.session_state[itens_auto_desc_key] = descricao_auto
         st.session_state[itens_state_key] = itens_estado
+        if itens_editor_key in st.session_state:
+            del st.session_state[itens_editor_key]
+
+    def sincronizar_itens_nova_exigencia(editor_key, state_key, tipo_item_default):
+        editor_state = st.session_state.get(editor_key, {})
+        if not isinstance(editor_state, dict):
+            return
+
+        colunas_itens = ["descricao", "tipo_item", "quantidade", "valor_unitario", "observacoes"]
+        dados = pd.DataFrame(st.session_state.get(state_key) or [], columns=colunas_itens)
+        if dados.empty:
+            dados = pd.DataFrame(
+                [{"descricao": "", "tipo_item": tipo_item_default, "quantidade": 1.0, "valor_unitario": 0.0, "observacoes": ""}],
+                columns=colunas_itens,
+            )
+
+        for indice, alteracoes_linha in editor_state.get("edited_rows", {}).items():
+            indice = int(indice)
+            if indice >= len(dados):
+                continue
+            for coluna, valor in alteracoes_linha.items():
+                if coluna in dados.columns:
+                    dados.at[indice, coluna] = valor
+
+        for indice in sorted(editor_state.get("deleted_rows", []), reverse=True):
+            indice = int(indice)
+            if indice < len(dados):
+                dados = dados.drop(dados.index[indice])
+
+        for nova_linha in editor_state.get("added_rows", []):
+            linha = {"descricao": "", "tipo_item": tipo_item_default, "quantidade": 1.0, "valor_unitario": 0.0, "observacoes": ""}
+            linha.update({coluna: valor for coluna, valor in nova_linha.items() if coluna in linha})
+            dados = pd.concat([dados, pd.DataFrame([linha])], ignore_index=True)
+
+        st.session_state[state_key] = dados[colunas_itens].to_dict("records")
 
     itens_base = pd.DataFrame(st.session_state[itens_state_key])
     itens_editados = st.data_editor(
@@ -2974,8 +3009,9 @@ elif menu == "nova_exigencia":
             "observacoes": st.column_config.TextColumn("Observacoes"),
         },
         key=itens_editor_key,
+        on_change=sincronizar_itens_nova_exigencia,
+        args=(itens_editor_key, itens_state_key, tipo_item_padrao),
     )
-    st.session_state[itens_state_key] = itens_editados.to_dict("records")
     itens_validos = itens_editados[itens_editados["descricao"].fillna("").str.strip() != ""].copy()
     if len(itens_validos):
         itens_validos["quantidade"] = pd.to_numeric(itens_validos["quantidade"], errors="coerce").fillna(0)
