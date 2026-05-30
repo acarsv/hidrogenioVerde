@@ -3402,11 +3402,11 @@ elif menu == "cotacoes":
             adicionar_todos = st.checkbox("Adicionar todos os itens autorizados desta rubrica", key=f"{prefixo}_adicionar_todos")
             if adicionar_todos:
                 itens = list(st.session_state[f"{prefixo}_itens"])
-                itens_ja_adicionados = {int(item["pedido_item_id"]) for item in itens if item.get("pedido_item_id") is not None}
+                itens_ja_adicionados = {str(item["pedido_item_id"]) for item in itens if item.get("pedido_item_id") is not None}
                 novos_itens = []
                 for _, item in pedido_itens.iterrows():
-                    pedido_item_id = int(item["id"])
-                    if pedido_item_id in itens_ja_adicionados:
+                    pedido_item_id = item["id"]
+                    if str(pedido_item_id) in itens_ja_adicionados:
                         continue
                     novos_itens.append({
                         "linha_id": f"novo_{len(itens) + len(novos_itens) + 1}_{pedido_item_id}",
