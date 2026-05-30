@@ -1165,6 +1165,20 @@ def format_currency_brl(valor) -> str:
 def format_currency_brl_markdown(valor) -> str:
     return format_currency_brl(valor).replace("$", r"\$")
 
+def apenas_digitos(valor) -> str:
+    return re.sub(r"\D", "", str(valor or ""))
+
+def format_cpf_cnpj(valor) -> str:
+    digitos = apenas_digitos(valor)
+    if len(digitos) == 11:
+        return f"{digitos[:3]}.{digitos[3:6]}.{digitos[6:9]}-{digitos[9:]}"
+    if len(digitos) == 14:
+        return f"{digitos[:2]}.{digitos[2:5]}.{digitos[5:8]}/{digitos[8:12]}-{digitos[12:]}"
+    return str(valor or "").strip()
+
+def formatar_cpf_cnpj_session_state(chave):
+    st.session_state[chave] = format_cpf_cnpj(st.session_state.get(chave, ""))
+
 def format_percent_brl(value) -> str:
     return f"{format_brl(value)}%"
 
@@ -3357,7 +3371,7 @@ elif menu == "cotacoes":
             itens_existentes = itens_existentes if itens_existentes is not None else pd.DataFrame()
             valores_iniciais = {
                 f"{prefixo}_fornecedor": str(cotacao_atual.get("fornecedor", "") or ""),
-                f"{prefixo}_cnpj": str(cotacao_atual.get("cnpj_cpf", "") or ""),
+                f"{prefixo}_cnpj": format_cpf_cnpj(cotacao_atual.get("cnpj_cpf", "")),
                 f"{prefixo}_contato": str(cotacao_atual.get("telefone_email", "") or ""),
                 f"{prefixo}_prazo": str(cotacao_atual.get("prazo_entrega", "") or ""),
                 f"{prefixo}_arquivo_url": str(cotacao_atual.get("arquivo_url", "") or ""),
@@ -3374,7 +3388,7 @@ elif menu == "cotacoes":
             st.markdown(f"### {'Editar' if editando_cotacao else 'Criar'} cotação {ordem}")
             st.caption("Altere os dados e salve a edição da cotação existente." if editando_cotacao else "Preencha os dados da empresa, adicione os itens e salve a nova cotação.")
             fornecedor = st.text_input("Fornecedor", key=f"{prefixo}_fornecedor")
-            cnpj = st.text_input("CNPJ/CPF", key=f"{prefixo}_cnpj")
+            cnpj = st.text_input("CNPJ/CPF", key=f"{prefixo}_cnpj", on_change=formatar_cpf_cnpj_session_state, args=(f"{prefixo}_cnpj",))
             contato = st.text_input("Telefone/E-mail", key=f"{prefixo}_contato")
             prazo = st.text_input("Prazo de entrega", key=f"{prefixo}_prazo")
             arquivo = st.file_uploader("Arquivo da cotação para o Google Drive", type=["pdf", "png", "jpg", "jpeg", "doc", "docx", "xls", "xlsx"], key=f"{prefixo}_arquivo")
@@ -3457,8 +3471,12 @@ elif menu == "cotacoes":
 
             texto_botao_salvar = "Salvar edição da cotação" if editando_cotacao else "Criar cotação"
             if st.button(texto_botao_salvar, key=f"{prefixo}_salvar"):
+                cnpj_formatado = format_cpf_cnpj(cnpj)
+                cnpj_digitos = apenas_digitos(cnpj_formatado)
                 if not fornecedor.strip():
                     st.error("Informe o fornecedor.")
+                elif cnpj_digitos and len(cnpj_digitos) not in (11, 14):
+                    st.error("Informe um CPF com 11 digitos ou CNPJ com 14 digitos.")
                 elif len(itens_editados) == 0:
                     st.error("Adicione pelo menos um item.")
                 elif (itens_editados["Quantidade"] <= 0).any():
@@ -3502,7 +3520,7 @@ elif menu == "cotacoes":
                             observacoes=%s
                         where id=%s
                         returning id
-                        """, (rubrica_id, fornecedor, cnpj, contato, 0, valor_total, prazo, "", arquivo_url_final, observacoes_gerais.strip() or None, int(cotacao_id_atual)))
+                        """, (rubrica_id, fornecedor, cnpj_formatado, contato, 0, valor_total, prazo, "", arquivo_url_final, observacoes_gerais.strip() or None, int(cotacao_id_atual)))
                     else:
                         cotacao_por_ordem = query("""
                         select c.id
@@ -3526,13 +3544,13 @@ elif menu == "cotacoes":
                                 observacoes=%s
                             where id=%s
                             returning id
-                            """, (rubrica_id, fornecedor, cnpj, contato, 0, valor_total, prazo, "", arquivo_url_final, observacoes_gerais.strip() or None, int(cotacao_por_ordem.iloc[0]["id"])))
+                            """, (rubrica_id, fornecedor, cnpj_formatado, contato, 0, valor_total, prazo, "", arquivo_url_final, observacoes_gerais.strip() or None, int(cotacao_por_ordem.iloc[0]["id"])))
                         else:
                             cotacao_salva = query("""
                             insert into cotacoes (solicitacao_id,rubrica_id,ordem,fornecedor,cnpj_cpf,telefone_email,valor_unitario,valor_total,prazo_entrega,forma_pagamento,arquivo_url,observacoes)
                             values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                             returning id
-                            """, (solicitacao_ancora_id, rubrica_id, ordem, fornecedor, cnpj, contato, 0, valor_total, prazo, "", arquivo_url_final, observacoes_gerais.strip() or None))
+                            """, (solicitacao_ancora_id, rubrica_id, ordem, fornecedor, cnpj_formatado, contato, 0, valor_total, prazo, "", arquivo_url_final, observacoes_gerais.strip() or None))
                     cotacao_id = int(cotacao_salva.iloc[0]["id"])
                     if upload_resultado:
                         execute("""
@@ -3586,7 +3604,7 @@ elif menu == "cotacoes":
                 st.markdown(f"### Cotação {int(cotacao_row['ordem'])}")
                 dados_empresa = pd.DataFrame([
                     ("Fornecedor", cotacao_row["fornecedor"]),
-                    ("CNPJ/CPF", cotacao_row["cnpj_cpf"]),
+                    ("CNPJ/CPF", format_cpf_cnpj(cotacao_row["cnpj_cpf"])),
                     ("Telefone/E-mail", cotacao_row["telefone_email"]),
                     ("Prazo de entrega", cotacao_row["prazo_entrega"]),
                     ("Pasta Google Drive", cotacao_row["arquivo_url"]),
