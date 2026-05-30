@@ -3074,17 +3074,20 @@ elif menu == "solicitacoes":
     tabela_solicitacoes = st.data_editor(
         df_editor,
         use_container_width=True,
-        disabled=["id", "rubrica", "descricao", "status", "autorizado", "criado_em"],
+        disabled=["id", "rubrica", "descricao", "status", "criado_em"],
         column_config={
             "quantidade": st.column_config.NumberColumn("quantidade", min_value=0.001, format="%.3f", disabled=not pode_editar_solicitacoes),
             "Valor estimado": st.column_config.NumberColumn("Valor estimado", min_value=0.0, format="R$ %.2f", disabled=not pode_editar_solicitacoes),
+            "autorizado": st.column_config.CheckboxColumn("autorizado", disabled=not pode_editar_solicitacoes),
         },
         key="solicitacoes_editor",
     )
     if pode_editar_solicitacoes and st.button("Salvar alteracoes da tabela", key="solicitacoes_salvar_tabela"):
         alteracoes = []
+        alteracoes_autorizacao = []
         original_por_id = df_editor.set_index("id")
         valores_invalidos = False
+        remocoes_autorizacao = []
         for _, linha in tabela_solicitacoes.iterrows():
             solicitacao_id = int(linha["id"])
             original = original_por_id.loc[solicitacao_id]
@@ -3102,16 +3105,52 @@ elif menu == "solicitacoes":
                 valor_estimado = (valor_unitario_original * quantidade).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             if quantidade != quantidade_original or valor_estimado != valor_original:
                 alteracoes.append((solicitacao_id, quantidade, valor_estimado, quantidade_original, valor_original))
+            autorizado = bool(linha["autorizado"])
+            autorizado_original = bool(original["autorizado"])
+            if autorizado != autorizado_original:
+                if autorizado:
+                    alteracoes_autorizacao.append((solicitacao_id, valor_estimado))
+                else:
+                    remocoes_autorizacao.append(solicitacao_id)
 
         if valores_invalidos:
             st.error("Preencha quantidade e valor estimado antes de salvar.")
-        elif not alteracoes:
+        elif remocoes_autorizacao:
+            st.error("A autorizacao ja concedida nao pode ser removida pela tabela.")
+        elif not alteracoes and not alteracoes_autorizacao:
             st.info("Nenhuma alteracao para salvar.")
         elif any(quantidade <= 0 for _, quantidade, _, _, _ in alteracoes):
             st.error("A quantidade deve ser maior que zero.")
         elif any(valor_estimado < 0 for _, _, valor_estimado, _, _ in alteracoes):
             st.error("O valor estimado nao pode ser negativo.")
         else:
+            erro_autorizacao = None
+            for solicitacao_id, valor_estimado in alteracoes_autorizacao:
+                solicitacao = query("""
+                select id, rubrica_id, coalesce(valor_estimado, 0) as valor_estimado, autorizado
+                from solicitacoes_compra
+                where id=%s
+                """, (solicitacao_id,))
+                if len(solicitacao) != 1:
+                    erro_autorizacao = f"Solicitacao #{solicitacao_id} nao encontrada."
+                    break
+                rubrica_autorizacao_id = int(solicitacao.iloc[0]["rubrica_id"])
+                saldo_df = query("select saldo_disponivel from vw_orcamento where id=%s", (rubrica_autorizacao_id,))
+                saldo_disponivel = Decimal(str(saldo_df.iloc[0]["saldo_disponivel"])) if len(saldo_df) == 1 else Decimal("0")
+                valor_atual_banco = Decimal(str(solicitacao.iloc[0]["valor_estimado"]))
+                saldo_disponivel_para_autorizacao = saldo_disponivel + valor_atual_banco
+                if Decimal(str(valor_estimado)) > saldo_disponivel_para_autorizacao:
+                    erro_autorizacao = (
+                        f"Solicitacao #{solicitacao_id} nao autorizada. "
+                        f"O valor estimado ({format_currency_brl_markdown(valor_estimado)}) "
+                        f"supera o disponivel operacional da rubrica ({format_currency_brl_markdown(saldo_disponivel_para_autorizacao)})."
+                    )
+                    break
+
+            if erro_autorizacao:
+                st.error(erro_autorizacao)
+                st.stop()
+
             for solicitacao_id, quantidade, valor_estimado, quantidade_original, valor_original in alteracoes:
                 execute("""
                 update solicitacoes_compra
@@ -3143,8 +3182,11 @@ elif menu == "solicitacoes":
                         f"valor {format_currency_brl(valor_original)} -> {format_currency_brl(valor_estimado)}"
                     ),
                 ))
+            for solicitacao_id, _ in alteracoes_autorizacao:
+                execute("update solicitacoes_compra set autorizado=true, gerente_id=%s, autorizado_em=now(), status='em_andamento', atualizado_em=now() where id=%s", (user["id"], solicitacao_id))
+                execute("insert into historico_status (solicitacao_id,status_novo,usuario_id,observacao) values (%s,'em_andamento',%s,'Autorizada pelo gerente na tabela')", (solicitacao_id, user["id"]))
             sincronizar_orcamento()
-            st.success(f"{len(alteracoes)} solicitacao(oes) atualizada(s).")
+            st.success(f"{len(alteracoes) + len(alteracoes_autorizacao)} alteracao(oes) salva(s).")
             st.rerun()
     if user["papel"] in ["gerente", "admin"]:
         st.markdown("### Autorizar solicitação")
