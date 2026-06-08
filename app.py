@@ -1122,7 +1122,8 @@ def ensure_financial_governance_schema():
     left join cotacao_resumo cr on cr.pedido_item_id = pi.id
     left join nota_resumo nr on nr.pedido_item_id = pi.id
     left join comprovante_resumo cbr on cbr.compra_id = c.id
-    left join destino_resumo dr on dr.pedido_item_id = pi.id;
+    left join destino_resumo dr on dr.pedido_item_id = pi.id
+    where s.status <> 'cancelado';
     select pg_advisory_unlock(2026052601);
     """)
 
