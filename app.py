@@ -1095,6 +1095,8 @@ def ensure_financial_governance_schema():
                 then 'ERRO: item com mais de um vencedor'
             when coalesce(cr.valor_cotado_vencedor, 0) - pi.valor_total > 0.01
                 then 'ERRO: valor cotado maior que solicitado'
+            when coalesce(cr.total_cotacoes, 0) < 3
+                then 'PENDENTE: cotacoes complementares pendentes'
             when coalesce(nr.total_itens_nf, 0) = 0
                 then 'PENDENTE: item sem nota fiscal'
             when coalesce(nr.valor_total_nf_item, 0) - coalesce(cr.valor_cotado_vencedor, 0) > 0.01
@@ -1543,6 +1545,7 @@ COLUNAS_AUDITORIA = {
     "tem_valor": "Tem valor",
     "tipo_valido": "Tipo válido",
     "total_cotacoes": "Total de cotações",
+    "cotacoes_pendentes": "Cotações pendentes",
     "total_vencedoras": "Cotações vencedoras",
     "fornecedor_vencedor": "Fornecedor vencedor",
     "tem_cotacao": "Tem cotação",
@@ -3253,7 +3256,7 @@ elif menu == "cotacoes":
     join solicitacoes_compra s on s.rubrica_id = r.id
     join pedido_itens pi on pi.pedido_id = s.id
     where s.autorizado=true
-      and s.status in ('em_andamento','cotado')
+      and s.status in ('em_andamento','cotado','aguardando_nota')
     order by r.codigo, r.nome
     """)
     solicitacoes = rubricas_cotacao
@@ -3280,7 +3283,7 @@ elif menu == "cotacoes":
         join solicitacoes_compra s on s.id = pi.pedido_id
         where s.rubrica_id=%s
           and s.autorizado=true
-          and s.status in ('em_andamento','cotado')
+          and s.status in ('em_andamento','cotado','aguardando_nota')
         order by s.id desc, pi.created_at, pi.descricao
         """, (rubrica_id,))
         if len(pedido_itens) == 0:
@@ -3691,7 +3694,14 @@ elif menu == "cotacoes":
                         if str(valor).strip()
                     )
                     for solicitacao_cotada_id in solicitacoes_cotadas:
-                        execute("update solicitacoes_compra set status='cotado' where id=%s", (int(solicitacao_cotada_id),))
+                        execute("""
+                        update solicitacoes_compra
+                        set status = case
+                            when status in ('aguardando_nota', 'finalizado') then status
+                            else 'cotado'
+                        end
+                        where id=%s
+                        """, (int(solicitacao_cotada_id),))
                     st.success("Cotação salva com os itens vinculados.")
                     st.session_state[f"cotacao_v2_editando_{sid}"] = None
                     st.rerun()
@@ -3810,6 +3820,13 @@ elif menu == "compra_nota":
     """, (rubrica_compra_id,))
 
     st.markdown("### Propostas recebidas")
+    total_propostas_recebidas = len(cotacoes_resumo)
+    if total_propostas_recebidas < 3:
+        st.warning(
+            "Compra permitida com cotação vencedora já recebida. "
+            f"Ainda faltam {3 - total_propostas_recebidas} cotação(ões) complementar(es); "
+            "a pendência ficará sinalizada na auditoria até o cadastro das demais propostas."
+        )
     cotacoes_resumo_exibicao = cotacoes_resumo.copy()
     cotacoes_resumo_exibicao["valor_total"] = cotacoes_resumo_exibicao["valor_total"].apply(format_currency_brl)
     st.dataframe(
@@ -4755,6 +4772,7 @@ elif menu == "auditoria":
                     "valor_economia",
                 ]].copy()
                 cotacoes_auditoria["tem_cotacao"] = cotacoes_auditoria["total_cotacoes"] > 0
+                cotacoes_auditoria["cotacoes_pendentes"] = (3 - cotacoes_auditoria["total_cotacoes"]).clip(lower=0)
                 cotacoes_auditoria["tem_vencedor"] = cotacoes_auditoria["total_vencedoras"] == 1
                 cotacoes_auditoria["valor_bate"] = (
                     cotacoes_auditoria["valor_cotado_vencedor"].fillna(0)
