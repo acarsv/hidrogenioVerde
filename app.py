@@ -3436,7 +3436,14 @@ elif menu == "cotacoes":
             )
             item_base = pedido_itens[pedido_itens["id"] == item_id].iloc[0]
             descricao_item = st.text_input("Descrição do produto", value=str(item_base["descricao"]), key=f"{prefixo}_desc_{item_id}")
-            tipo_item = st.text_input("Tipo", value=str(item_base["tipo_item"]), key=f"{prefixo}_tipo_{item_id}")
+            tipos_item = ["permanente", "consumo", "servico"]
+            tipo_item_base = str(item_base["tipo_item"] or "consumo")
+            tipo_item = st.selectbox(
+                "Tipo",
+                tipos_item,
+                index=tipos_item.index(tipo_item_base) if tipo_item_base in tipos_item else 1,
+                key=f"{prefixo}_tipo_{item_id}",
+            )
             col_qtd, col_valor = st.columns(2)
             with col_qtd:
                 quantidade = st.number_input("Quantidade", min_value=0.01, value=float(item_base["quantidade"]), format="%.2f", key=f"{prefixo}_qtd_{item_id}")
@@ -3457,6 +3464,8 @@ elif menu == "cotacoes":
                 })
                 st.session_state[f"{prefixo}_itens"] = itens
                 st.session_state[f"{prefixo}_editor_version"] += 1
+                st.success("Item adicionado a cotacao.")
+                st.rerun()
 
             st.markdown("### Itens da cotação")
             itens_editados = st.data_editor(
@@ -3477,6 +3486,7 @@ elif menu == "cotacoes":
                 itens_editados = itens_editados[itens_editados["Remover"] != True].copy()
                 st.session_state[f"{prefixo}_itens"] = itens_editados.to_dict("records")
                 st.session_state[f"{prefixo}_editor_version"] += 1
+                st.rerun()
             if "Quantidade" not in itens_editados.columns:
                 itens_editados = pd.DataFrame(columns=["linha_id", "pedido_item_id", "Item", "Tipo", "Quantidade", "Valor unitario", "Observacoes", "Remover"])
             st.session_state[f"{prefixo}_itens"] = itens_editados.to_dict("records")
