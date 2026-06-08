@@ -3460,16 +3460,7 @@ elif menu == "cotacoes":
                 pedido_item_id = item_id
                 texto_botao_adicionar_item = "Adicionar item à cotação"
             else:
-                solicitacoes_item_novo = pedido_itens[["pedido_id", "solicitacao"]].drop_duplicates().copy()
-                solicitacao_item_id = st.selectbox(
-                    "Solicitação vinculada ao item novo",
-                    solicitacoes_item_novo["pedido_id"].tolist(),
-                    format_func=lambda valor: (
-                        f"Solicitação #{int(valor)} - "
-                        f"{solicitacoes_item_novo.loc[solicitacoes_item_novo.pedido_id == valor, 'solicitacao'].iloc[0]}"
-                    ),
-                    key=f"{prefixo}_solicitacao_item_novo",
-                )
+                solicitacao_item_id = int(pedido_itens["pedido_id"].iloc[0])
                 descricao_item = st.text_input("Descrição do produto", key=f"{prefixo}_desc_item_novo")
                 tipo_item = st.selectbox("Tipo", tipos_item, index=1, key=f"{prefixo}_tipo_item_novo")
                 quantidade_padrao = 1.0
