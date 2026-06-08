@@ -3314,6 +3314,7 @@ elif menu == "cotacoes":
             select
               ci.id,
               ci.pedido_item_id,
+              pi.pedido_id as solicitacao_id,
               coalesce(ci.descricao_item, pi.descricao) as item,
               coalesce(ci.tipo_item, pi.tipo_item) as tipo,
               ci.quantidade,
@@ -3355,6 +3356,7 @@ elif menu == "cotacoes":
                 st.session_state[f"{prefixo}_itens"].append({
                     "linha_id": f"existente_{item['id']}",
                     "pedido_item_id": item["pedido_item_id"],
+                    "solicitacao_id": item.get("solicitacao_id"),
                     "Item": item["item"],
                     "Tipo": item["tipo"],
                     "Quantidade": float(item["quantidade"]),
@@ -3411,6 +3413,7 @@ elif menu == "cotacoes":
                     novos_itens.append({
                         "linha_id": f"novo_{len(itens) + len(novos_itens) + 1}_{pedido_item_id}",
                         "pedido_item_id": pedido_item_id,
+                        "solicitacao_id": item["pedido_id"],
                         "Item": item["descricao"],
                         "Tipo": item["tipo_item"],
                         "Quantidade": float(item["quantidade"]),
@@ -3425,38 +3428,71 @@ elif menu == "cotacoes":
                     st.rerun()
                 else:
                     st.info("Todos os itens autorizados desta rubrica ja estao na cotacao.")
-            item_id = st.selectbox(
-                "Item da rubrica",
-                pedido_itens["id"].tolist(),
-                format_func=lambda valor: (
-                    f"Solicitação #{int(pedido_itens.loc[pedido_itens.id == valor, 'pedido_id'].iloc[0])} - "
-                    f"{pedido_itens.loc[pedido_itens.id == valor, 'descricao'].iloc[0]}"
-                ),
-                key=f"{prefixo}_item",
-            )
-            item_base = pedido_itens[pedido_itens["id"] == item_id].iloc[0]
-            descricao_item = st.text_input("Descrição do produto", value=str(item_base["descricao"]), key=f"{prefixo}_desc_{item_id}")
             tipos_item = ["permanente", "consumo", "servico"]
-            tipo_item_base = str(item_base["tipo_item"] or "consumo")
-            tipo_item = st.selectbox(
-                "Tipo",
-                tipos_item,
-                index=tipos_item.index(tipo_item_base) if tipo_item_base in tipos_item else 1,
-                key=f"{prefixo}_tipo_{item_id}",
+            origem_item = st.radio(
+                "Origem do item",
+                ["Item autorizado da rubrica", "Item novo da cotação"],
+                horizontal=True,
+                key=f"{prefixo}_origem_item",
             )
+            if origem_item == "Item autorizado da rubrica":
+                item_id = st.selectbox(
+                    "Item da rubrica",
+                    pedido_itens["id"].tolist(),
+                    format_func=lambda valor: (
+                        f"Solicitação #{int(pedido_itens.loc[pedido_itens.id == valor, 'pedido_id'].iloc[0])} - "
+                        f"{pedido_itens.loc[pedido_itens.id == valor, 'descricao'].iloc[0]}"
+                    ),
+                    key=f"{prefixo}_item",
+                )
+                item_base = pedido_itens[pedido_itens["id"] == item_id].iloc[0]
+                descricao_item = st.text_input("Descrição do produto", value=str(item_base["descricao"]), key=f"{prefixo}_desc_{item_id}")
+                tipo_item_base = str(item_base["tipo_item"] or "consumo")
+                tipo_item = st.selectbox(
+                    "Tipo",
+                    tipos_item,
+                    index=tipos_item.index(tipo_item_base) if tipo_item_base in tipos_item else 1,
+                    key=f"{prefixo}_tipo_{item_id}",
+                )
+                quantidade_padrao = float(item_base["quantidade"])
+                valor_unitario_padrao = float(item_base["valor_unitario"] or 0)
+                solicitacao_item_id = int(item_base["pedido_id"])
+                pedido_item_id = item_id
+                texto_botao_adicionar_item = "Adicionar item à cotação"
+            else:
+                solicitacoes_item_novo = pedido_itens[["pedido_id", "solicitacao"]].drop_duplicates().copy()
+                solicitacao_item_id = st.selectbox(
+                    "Solicitação vinculada ao item novo",
+                    solicitacoes_item_novo["pedido_id"].tolist(),
+                    format_func=lambda valor: (
+                        f"Solicitação #{int(valor)} - "
+                        f"{solicitacoes_item_novo.loc[solicitacoes_item_novo.pedido_id == valor, 'solicitacao'].iloc[0]}"
+                    ),
+                    key=f"{prefixo}_solicitacao_item_novo",
+                )
+                descricao_item = st.text_input("Descrição do produto", key=f"{prefixo}_desc_item_novo")
+                tipo_item = st.selectbox("Tipo", tipos_item, index=1, key=f"{prefixo}_tipo_item_novo")
+                quantidade_padrao = 1.0
+                valor_unitario_padrao = 0.0
+                pedido_item_id = None
+                texto_botao_adicionar_item = "Adicionar item novo à cotação"
             col_qtd, col_valor = st.columns(2)
             with col_qtd:
-                quantidade = st.number_input("Quantidade", min_value=0.01, value=float(item_base["quantidade"]), format="%.2f", key=f"{prefixo}_qtd_{item_id}")
+                quantidade = st.number_input("Quantidade", min_value=0.01, value=quantidade_padrao, format="%.2f", key=f"{prefixo}_qtd_{origem_item}")
             with col_valor:
-                valor_unitario = st.number_input("Valor unitário", min_value=0.0, value=float(item_base["valor_unitario"] or 0), format="%.2f", key=f"{prefixo}_valor_{item_id}")
-            observacao_item = st.text_input("Observação do item", key=f"{prefixo}_obs_item_{item_id}")
-            if st.button("Adicionar item à cotação", key=f"{prefixo}_adicionar"):
+                valor_unitario = st.number_input("Valor unitário", min_value=0.0, value=valor_unitario_padrao, format="%.2f", key=f"{prefixo}_valor_{origem_item}")
+            observacao_item = st.text_input("Observação do item", key=f"{prefixo}_obs_item_{origem_item}")
+            if st.button(texto_botao_adicionar_item, key=f"{prefixo}_adicionar"):
+                if not str(descricao_item or "").strip():
+                    st.error("Informe a descrição do item.")
+                    st.stop()
                 itens = list(st.session_state[f"{prefixo}_itens"])
                 itens.append({
-                    "linha_id": f"novo_{len(itens) + 1}_{item_id}",
-                    "pedido_item_id": item_id,
-                    "Item": descricao_item.strip() or item_base["descricao"],
-                    "Tipo": tipo_item.strip() or item_base["tipo_item"],
+                    "linha_id": f"novo_{len(itens) + 1}_{pedido_item_id or 'manual'}",
+                    "pedido_item_id": pedido_item_id,
+                    "solicitacao_id": solicitacao_item_id,
+                    "Item": descricao_item.strip(),
+                    "Tipo": tipo_item,
                     "Quantidade": float(quantidade),
                     "Valor unitario": float(valor_unitario),
                     "Observacoes": observacao_item.strip(),
@@ -3468,14 +3504,17 @@ elif menu == "cotacoes":
                 st.rerun()
 
             st.markdown("### Itens da cotação")
+            colunas_editor_cotacao = ["linha_id", "pedido_item_id", "solicitacao_id", "Item", "Tipo", "Quantidade", "Valor unitario", "Observacoes", "Remover"]
             itens_editados = st.data_editor(
-                pd.DataFrame(st.session_state[f"{prefixo}_itens"], columns=["linha_id", "pedido_item_id", "Item", "Tipo", "Quantidade", "Valor unitario", "Observacoes", "Remover"]),
+                pd.DataFrame(st.session_state[f"{prefixo}_itens"], columns=colunas_editor_cotacao),
                 use_container_width=True,
                 hide_index=True,
-                disabled=["linha_id", "pedido_item_id"],
+                disabled=["linha_id", "pedido_item_id", "solicitacao_id"],
                 column_config={
                     "linha_id": None,
                     "pedido_item_id": None,
+                    "solicitacao_id": None,
+                    "Tipo": st.column_config.SelectboxColumn("Tipo", options=tipos_item, required=True),
                     "Quantidade": st.column_config.NumberColumn("Quantidade", min_value=0.01, format="%.2f"),
                     "Valor unitario": st.column_config.NumberColumn("Valor unitário", min_value=0.0, format="R$ %.2f"),
                     "Remover": st.column_config.CheckboxColumn("Remover"),
@@ -3488,7 +3527,7 @@ elif menu == "cotacoes":
                 st.session_state[f"{prefixo}_editor_version"] += 1
                 st.rerun()
             if "Quantidade" not in itens_editados.columns:
-                itens_editados = pd.DataFrame(columns=["linha_id", "pedido_item_id", "Item", "Tipo", "Quantidade", "Valor unitario", "Observacoes", "Remover"])
+                itens_editados = pd.DataFrame(columns=colunas_editor_cotacao)
             st.session_state[f"{prefixo}_itens"] = itens_editados.to_dict("records")
             itens_editados["Quantidade"] = pd.to_numeric(itens_editados["Quantidade"], errors="coerce").fillna(0)
             itens_editados["Valor unitario numerico"] = pd.to_numeric(itens_editados["Valor unitario"], errors="coerce").fillna(0)
@@ -3506,6 +3545,14 @@ elif menu == "cotacoes":
             st.metric("Valor total da cotação", format_currency_brl(valor_total))
 
             texto_botao_salvar = "Salvar edição da cotação" if editando_cotacao else "Criar cotação"
+            def valor_ausente(valor):
+                if valor is None:
+                    return True
+                try:
+                    return bool(pd.isna(valor))
+                except TypeError:
+                    return False
+
             if st.button(texto_botao_salvar, key=f"{prefixo}_salvar"):
                 cnpj_formatado = format_cpf_cnpj(cnpj)
                 cnpj_digitos = apenas_digitos(cnpj_formatado)
@@ -3515,6 +3562,10 @@ elif menu == "cotacoes":
                     st.error("Informe um CPF com 11 digitos ou CNPJ com 14 digitos.")
                 elif len(itens_editados) == 0:
                     st.error("Adicione pelo menos um item.")
+                elif itens_editados["Item"].fillna("").astype(str).str.strip().eq("").any():
+                    st.error("Todos os itens devem ter descrição.")
+                elif not itens_editados["Tipo"].fillna("").isin(tipos_item).all():
+                    st.error("Todos os itens devem ter tipo válido: permanente, consumo ou servico.")
                 elif (itens_editados["Quantidade"] <= 0).any():
                     st.error("Todos os itens devem ter quantidade maior que zero.")
                 elif (itens_editados["Valor unitario numerico"] < 0).any():
@@ -3541,8 +3592,34 @@ elif menu == "cotacoes":
                                 "A cotacao sera salva sem anexo; depois atualize o token do Drive e edite a cotacao para anexar novamente. "
                                 f"Detalhe: {exc}"
                             )
+                    for indice_item, item in itens_editados.iterrows():
+                        if not valor_ausente(item.get("pedido_item_id")):
+                            continue
+                        solicitacao_item_id = int(item.get("solicitacao_id"))
+                        item_criado = query("""
+                        insert into pedido_itens (pedido_id, rubrica_id, descricao, tipo_item, quantidade, valor_unitario, status, observacoes)
+                        values (%s,%s,%s,%s,%s,%s,'em_cotacao',%s)
+                        returning id
+                        """, (
+                            solicitacao_item_id,
+                            rubrica_id,
+                            str(item.get("Item") or "").strip(),
+                            str(item.get("Tipo") or "").strip(),
+                            Decimal(str(item["Quantidade"])),
+                            Decimal(str(item["Valor unitario numerico"])),
+                            str(item.get("Observacoes") or "").strip() or "Item criado diretamente na cotação.",
+                        ))
+                        itens_editados.at[indice_item, "pedido_item_id"] = item_criado.iloc[0]["id"]
+
                     item_ancora_id = itens_editados.iloc[0]["pedido_item_id"]
-                    solicitacao_ancora_id = int(cotacao_atual.get("solicitacao_id") or pedido_itens.loc[pedido_itens.id == item_ancora_id, "pedido_id"].iloc[0])
+                    if cotacao_atual.get("solicitacao_id"):
+                        solicitacao_ancora_id = int(cotacao_atual.get("solicitacao_id"))
+                    else:
+                        solicitacao_ancora = pedido_itens.loc[pedido_itens.id == item_ancora_id, "pedido_id"]
+                        if len(solicitacao_ancora):
+                            solicitacao_ancora_id = int(solicitacao_ancora.iloc[0])
+                        else:
+                            solicitacao_ancora_id = int(itens_editados.iloc[0]["solicitacao_id"])
                     cotacao_id_atual = cotacao_atual.get("id")
                     if cotacao_id_atual:
                         cotacao_salva = query("""
@@ -3616,7 +3693,12 @@ elif menu == "cotacoes":
                         insert into cotacao_itens (cotacao_id, pedido_item_id, descricao_item, tipo_item, quantidade, valor_unitario, observacoes)
                         values (%s,%s,%s,%s,%s,%s,%s)
                         """, (cotacao_id, item["pedido_item_id"], str(item.get("Item") or "").strip() or None, str(item.get("Tipo") or "").strip() or None, Decimal(str(item["Quantidade"])), Decimal(str(item["Valor unitario numerico"])), str(item.get("Observacoes") or "").strip() or None))
-                    solicitacoes_cotadas = pedido_itens[pedido_itens["id"].isin(itens_editados["pedido_item_id"])]["pedido_id"].dropna().unique().tolist()
+                    solicitacoes_cotadas = set(pedido_itens[pedido_itens["id"].isin(itens_editados["pedido_item_id"])]["pedido_id"].dropna().unique().tolist())
+                    solicitacoes_cotadas.update(
+                        int(valor)
+                        for valor in itens_editados["solicitacao_id"].dropna().tolist()
+                        if str(valor).strip()
+                    )
                     for solicitacao_cotada_id in solicitacoes_cotadas:
                         execute("update solicitacoes_compra set status='cotado' where id=%s", (int(solicitacao_cotada_id),))
                     st.success("Cotação salva com os itens vinculados.")
