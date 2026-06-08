@@ -2494,6 +2494,11 @@ def sincronizar_orcamento():
         where s.status in ('solicitacao', 'em_andamento', 'cotado', 'aguardando_nota')
           and not exists (
               select 1
+              from compras c
+              where c.solicitacao_id = s.id
+          )
+          and not exists (
+              select 1
               from nota_fiscal_itens nfi
               left join patrimonio p on p.nota_fiscal_item_id = nfi.id
               left join estoque_consumo e on e.nota_fiscal_item_id = nfi.id
@@ -2510,19 +2515,12 @@ def sincronizar_orcamento():
     set valor_utilizado = totais.valor_total
     from (
         select
-          pi.rubrica_id,
-          coalesce(sum(nfi.valor_total), 0) as valor_total
-        from nota_fiscal_itens nfi
-        join pedido_itens pi on pi.id = nfi.pedido_item_id
-        join solicitacoes_compra s on s.id = pi.pedido_id
-        left join patrimonio p on p.nota_fiscal_item_id = nfi.id
-        left join estoque_consumo e on e.nota_fiscal_item_id = nfi.id
-        left join atesto_servico a on a.nota_fiscal_item_id = nfi.id
-        where s.status = 'finalizado'
-           or p.id is not null
-           or e.id is not null
-           or a.id is not null
-        group by pi.rubrica_id
+          coalesce(cot.rubrica_id, s.rubrica_id) as rubrica_id,
+          coalesce(sum(c.valor_compra), 0) as valor_total
+        from compras c
+        join solicitacoes_compra s on s.id = c.solicitacao_id
+        left join cotacoes cot on cot.id = c.cotacao_vencedora_id
+        group by coalesce(cot.rubrica_id, s.rubrica_id)
     ) totais
     where r.id = totais.rubrica_id
     """)
