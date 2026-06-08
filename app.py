@@ -3476,10 +3476,37 @@ elif menu == "cotacoes":
                 valor_unitario = st.number_input("Valor unitário", min_value=0.0, value=valor_unitario_padrao, format="%.2f", key=f"{prefixo}_valor_{origem_item}")
             observacao_item = st.text_input("Observação do item", key=f"{prefixo}_obs_item_{origem_item}")
             if st.button(texto_botao_adicionar_item, key=f"{prefixo}_adicionar"):
-                if not str(descricao_item or "").strip():
+                descricao_normalizada = " ".join(str(descricao_item or "").strip().lower().split())
+                if not descricao_normalizada:
                     st.error("Informe a descrição do item.")
                     st.stop()
                 itens = list(st.session_state[f"{prefixo}_itens"])
+                item_duplicado_na_cotacao = any(
+                    " ".join(str(item.get("Item") or "").strip().lower().split()) == descricao_normalizada
+                    and str(item.get("solicitacao_id") or "") == str(solicitacao_item_id)
+                    and item.get("Remover") != True
+                    for item in itens
+                )
+                if item_duplicado_na_cotacao:
+                    st.error("Este item já está cadastrado nesta cotação.")
+                    st.stop()
+                if pedido_item_id is None:
+                    item_duplicado_pedido = pedido_itens[
+                        (pedido_itens["pedido_id"].astype(str) == str(solicitacao_item_id))
+                        & (pedido_itens["descricao"].fillna("").astype(str).str.strip().str.lower().str.replace(r"\s+", " ", regex=True) == descricao_normalizada)
+                    ]
+                    if len(item_duplicado_pedido):
+                        st.error("Este item já está cadastrado na solicitação. Selecione 'Item autorizado da rubrica' para adicioná-lo à cotação.")
+                        st.stop()
+                else:
+                    item_id_ja_adicionado = any(
+                        str(item.get("pedido_item_id") or "") == str(pedido_item_id)
+                        and item.get("Remover") != True
+                        for item in itens
+                    )
+                    if item_id_ja_adicionado:
+                        st.error("Este item já está cadastrado nesta cotação.")
+                        st.stop()
                 itens.append({
                     "linha_id": f"novo_{len(itens) + 1}_{pedido_item_id or 'manual'}",
                     "pedido_item_id": pedido_item_id,
@@ -3559,6 +3586,11 @@ elif menu == "cotacoes":
                     st.error("Todos os itens devem ter descrição.")
                 elif not itens_editados["Tipo"].fillna("").isin(tipos_item).all():
                     st.error("Todos os itens devem ter tipo válido: permanente, consumo ou servico.")
+                elif itens_editados.assign(
+                    item_normalizado=itens_editados["Item"].fillna("").astype(str).str.strip().str.lower().str.replace(r"\s+", " ", regex=True),
+                    solicitacao_normalizada=itens_editados["solicitacao_id"].fillna("").astype(str),
+                ).duplicated(["solicitacao_normalizada", "item_normalizado"]).any():
+                    st.error("Há item duplicado na cotação. Remova a repetição antes de salvar.")
                 elif (itens_editados["Quantidade"] <= 0).any():
                     st.error("Todos os itens devem ter quantidade maior que zero.")
                 elif (itens_editados["Valor unitario numerico"] < 0).any():
