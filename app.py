@@ -989,7 +989,8 @@ def ensure_financial_governance_schema():
             count(*) as total_cotacoes,
             count(*) filter (where ci.vencedor = true) as total_vencedoras,
             max(c.fornecedor) filter (where ci.vencedor = true) as fornecedor_vencedor,
-            sum(ci.valor_total) filter (where ci.vencedor = true) as valor_cotado_vencedor
+            sum(ci.valor_total) filter (where ci.vencedor = true) as valor_cotado_vencedor,
+            min(ci.valor_total) as menor_valor_cotado
         from cotacao_itens ci
         join cotacoes c on c.id = ci.cotacao_id
         where ci.pedido_item_id is not null
@@ -1060,6 +1061,7 @@ def ensure_financial_governance_schema():
         coalesce(cr.total_vencedoras, 0) as total_vencedoras,
         cr.fornecedor_vencedor,
         coalesce(cr.valor_cotado_vencedor, 0) as valor_cotado_vencedor,
+        coalesce(cr.menor_valor_cotado, 0) as menor_valor_cotado,
 
         coalesce(nr.total_itens_nf, 0) as total_itens_nf,
         nr.notas_fiscais,
@@ -1575,6 +1577,7 @@ COLUNAS_AUDITORIA = {
     "valor_utilizado": "Valor utilizado",
     "saldo_restante": "Saldo restante",
     "valor_cotado_vencedor": "Valor cotado vencedor",
+    "menor_valor_cotado": "Menor valor cotado",
     "valor_nf_item": "Valor do item na NF",
     "valor_economia": "Valor economizado",
     "valor_nota": "Valor da nota",
@@ -1594,6 +1597,7 @@ COLUNAS_VALOR_AUDITORIA = {
     "Valor utilizado",
     "Saldo restante",
     "Valor cotado vencedor",
+    "Menor valor cotado",
     "Valor do item na NF",
     "Valor economizado",
     "Valor da nota",
@@ -2297,6 +2301,94 @@ def ajustar_valor_solicitado_para_nf(pedido_item_id, usuario_id):
                 (
                     f"Valor solicitado do item ajustado para o valor da NF: {descricao_item}. "
                     f"De R$ {valor_solicitado:.2f} para R$ {valor_nf_item:.2f}."
+                ),
+            ))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    sincronizar_orcamento()
+
+
+def ajustar_valor_estimado_para_menor_cotacao(pedido_item_id, usuario_id):
+    conn = get_conn()
+    conn.autocommit = False
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+            select
+                pi.id,
+                pi.pedido_id,
+                pi.descricao,
+                pi.quantidade,
+                pi.valor_total as valor_estimado_atual,
+                s.status as status_solicitacao,
+                (
+                    select min(ci.valor_total)
+                    from cotacao_itens ci
+                    where ci.pedido_item_id = pi.id
+                ) as menor_valor_cotado
+            from pedido_itens pi
+            join solicitacoes_compra s on s.id = pi.pedido_id
+            where pi.id=%s
+            """, (pedido_item_id,))
+            item = cur.fetchone()
+            if not item:
+                raise ValueError("Item do pedido nao encontrado.")
+
+            quantidade = Decimal(str(item["quantidade"] or 0))
+            valor_estimado_atual = Decimal(str(item["valor_estimado_atual"] or 0))
+            menor_valor_cotado = Decimal(str(item["menor_valor_cotado"] or 0))
+            if quantidade <= 0:
+                raise ValueError("Quantidade do item deve ser maior que zero.")
+            if menor_valor_cotado <= 0:
+                raise ValueError("Nao existem cotacoes validas para ajustar este item.")
+            if menor_valor_cotado <= valor_estimado_atual:
+                raise ValueError("O menor valor cotado nao e maior que o valor estimado atual.")
+
+            novo_valor_unitario = (menor_valor_cotado / quantidade).quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            )
+            solicitacao_id = int(item["pedido_id"])
+
+            cur.execute("""
+            update pedido_itens
+            set valor_unitario=%s
+            where id=%s
+            """, (novo_valor_unitario, pedido_item_id))
+
+            cur.execute("""
+            update solicitacoes_compra s
+            set valor_estimado = totais.valor_total,
+                quantidade = totais.quantidade_total,
+                atualizado_em = now()
+            from (
+                select
+                    pedido_id,
+                    coalesce(sum(valor_total), 0) as valor_total,
+                    coalesce(sum(quantidade), 0) as quantidade_total
+                from pedido_itens
+                where pedido_id=%s
+                group by pedido_id
+            ) totais
+            where s.id = totais.pedido_id
+            """, (solicitacao_id,))
+
+            cur.execute("""
+            insert into historico_status (solicitacao_id,status_novo,usuario_id,observacao)
+            values (%s,%s,%s,%s)
+            """, (
+                solicitacao_id,
+                item["status_solicitacao"],
+                usuario_id,
+                (
+                    f"Auditoria confirmou ajuste do valor estimado para o menor valor cotado: "
+                    f"{item['descricao']}. De R$ {valor_estimado_atual:.2f} "
+                    f"para R$ {menor_valor_cotado:.2f}."
                 ),
             ))
         conn.commit()
@@ -4799,6 +4891,7 @@ elif menu == "auditoria":
                     "total_vencedoras",
                     "fornecedor_vencedor",
                     "valor_solicitado",
+                    "menor_valor_cotado",
                     "valor_cotado_vencedor",
                     "valor_economia",
                 ]].copy()
@@ -4876,6 +4969,7 @@ elif menu == "auditoria":
                             "descricao",
                             "tipo_item",
                             "valor_solicitado",
+                            "menor_valor_cotado",
                             "valor_cotado_vencedor",
                             "valor_nf_item",
                             "valor_economia",
@@ -4884,6 +4978,49 @@ elif menu == "auditoria":
                         use_container_width=True,
                         hide_index=True,
                     )
+                    problemas_estimativa = problemas[
+                        problemas["status_auditoria"].str.contains(
+                            "valor cotado maior",
+                            case=False,
+                            na=False,
+                        )
+                        & (problemas["menor_valor_cotado"].fillna(0) > 0)
+                        & (
+                            problemas["menor_valor_cotado"].fillna(0)
+                            - problemas["valor_solicitado"].fillna(0)
+                            > 0.01
+                        )
+                    ].copy()
+                    if not problemas_estimativa.empty:
+                        st.markdown("#### Confirmar estimativa pelo menor valor cotado")
+                        st.info(
+                            "Use este ajuste quando a pesquisa de mercado comprovar que o valor "
+                            "estimado ficou abaixo de todas as cotacoes recebidas."
+                        )
+                        item_estimativa_id = st.selectbox(
+                            "Item com estimativa abaixo do mercado",
+                            problemas_estimativa["pedido_item_id"].tolist(),
+                            format_func=lambda item_id: (
+                                f"Solicitacao {problemas_estimativa.loc[problemas_estimativa.pedido_item_id == item_id, 'solicitacao_id'].iloc[0]} - "
+                                f"{problemas_estimativa.loc[problemas_estimativa.pedido_item_id == item_id, 'descricao'].iloc[0]} - "
+                                f"Estimado {format_currency_brl(problemas_estimativa.loc[problemas_estimativa.pedido_item_id == item_id, 'valor_solicitado'].iloc[0])} / "
+                                f"Menor cotacao {format_currency_brl(problemas_estimativa.loc[problemas_estimativa.pedido_item_id == item_id, 'menor_valor_cotado'].iloc[0])}"
+                            ),
+                            key="auditoria_item_ajustar_estimativa",
+                        )
+                        confirmar_estimativa = st.checkbox(
+                            "Confirmo que o menor valor cotado representa o menor preco de mercado e deve substituir o valor estimado.",
+                            key="confirmar_ajuste_estimativa_cotacao",
+                        )
+                        if st.button("Ajustar estimativa para menor valor cotado", type="primary"):
+                            if not confirmar_estimativa:
+                                st.error("Marque a confirmacao do auditor antes de ajustar a estimativa.")
+                            else:
+                                ajustar_valor_estimado_para_menor_cotacao(item_estimativa_id, user["id"])
+                                st.success(
+                                    "Valor estimado ajustado para o menor valor cotado e confirmacao registrada no historico."
+                                )
+                                st.rerun()
                     problemas_retorno = problemas[
                         problemas["status_auditoria"].str.contains(
                             "valor cotado maior|valor da NF maior|fornecedor da NF diverge|mais de um vencedor",
