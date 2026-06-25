@@ -1570,7 +1570,7 @@ def texto_dados_adicionais_fornecedor(rubrica, tipos_itens=None) -> list[tuple[s
         ("PAGAMENTO: A VISTA", False),
         ("PIX: XXXXXX", True),
         ("", False),
-        (f"PARTE DO {tipo_material}: {rubrica_texto}", True),
+        (f"PARTE DO {tipo_material}: {rubrica_texto}", False),
         ("", False),
         ("LOCAL DE ENTREGA / EXECUCAO", False),
         ("LABDES/UFCG Avenida Aprigio Veloso, 882, Bairro Universitario,", False),
@@ -1589,13 +1589,13 @@ def construir_pdf_dados_adicionais_fornecedor(rubrica, tipos_itens=None) -> byte
     largura = 595
     altura = 842
     margem = 42
-    y = altura - margem
+    y = altura - margem - 8
     tamanho_fonte = 12
     entrelinha = 16
     comandos = [
         "BT /F1 12 Tf 14 TL ET",
         "0.8 w",
-        f"{margem - 4} {margem - 12} {largura - (2 * margem) + 8} {altura - (2 * margem) + 20} re S",
+        f"{margem - 4} {margem - 12} {largura - (2 * margem) + 8} {altura - (2 * margem) + 10} re S",
     ]
 
     for texto, destacar in texto_dados_adicionais_fornecedor(rubrica, tipos_itens):
