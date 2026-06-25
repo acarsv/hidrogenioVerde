@@ -1562,7 +1562,7 @@ def tipo_material_para_pdf(tipo_rubrica: str, tipos_itens=None) -> str:
 
 def texto_dados_adicionais_fornecedor(rubrica, tipos_itens=None) -> list[tuple[str, bool]]:
     tipo_material = tipo_material_para_pdf(rubrica.get("tipo"), tipos_itens)
-    rubrica_texto = f"{rubrica.get('codigo', '')} - {rubrica.get('nome', '')}".strip(" -")
+    rubrica_texto = str(rubrica.get("nome") or "").strip()
     return [
         ("Dados adicionais", False),
         ("Observacoes", False),
