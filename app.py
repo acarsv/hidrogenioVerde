@@ -1526,6 +1526,115 @@ def construir_planilha_itens_comprados(df: pd.DataFrame) -> bytes:
     arquivo.seek(0)
     return arquivo.getvalue()
 
+def pdf_escape(texto) -> str:
+    return (
+        str(texto or "")
+        .replace("\\", "\\\\")
+        .replace("(", "\\(")
+        .replace(")", "\\)")
+    )
+
+def quebrar_linha_pdf(texto: str, max_chars: int = 78) -> list[str]:
+    linhas = []
+    for paragrafo in str(texto or "").splitlines() or [""]:
+        palavras = paragrafo.split()
+        if not palavras:
+            linhas.append("")
+            continue
+        linha = palavras[0]
+        for palavra in palavras[1:]:
+            if len(linha) + 1 + len(palavra) <= max_chars:
+                linha += f" {palavra}"
+            else:
+                linhas.append(linha)
+                linha = palavra
+        linhas.append(linha)
+    return linhas
+
+def tipo_material_para_pdf(tipo_rubrica: str, tipos_itens=None) -> str:
+    tipo = str(tipo_rubrica or "").lower()
+    tipos = {str(valor or "").lower() for valor in (tipos_itens or [])}
+    if "permanente" in tipo or "permanente" in tipos:
+        return "MATERIAL PERMANENTE"
+    if "consumo" in tipo or "consumo" in tipos:
+        return "MATERIAL DE CONSUMO"
+    return "MATERIAL"
+
+def texto_dados_adicionais_fornecedor(rubrica, tipos_itens=None) -> list[tuple[str, bool]]:
+    tipo_material = tipo_material_para_pdf(rubrica.get("tipo"), tipos_itens)
+    rubrica_texto = f"{rubrica.get('codigo', '')} - {rubrica.get('nome', '')}".strip(" -")
+    return [
+        ("Dados adicionais", False),
+        ("Observacoes", False),
+        ("Empresa optante pelo simples nacional, sem direito a credito de ICMS E IPI.", False),
+        ("PAGAMENTO: A VISTA", False),
+        ("PIX: XXXXXX", True),
+        ("", False),
+        (f"PARTE DO {tipo_material}: {rubrica_texto}", True),
+        ("", False),
+        ("LOCAL DE ENTREGA / EXECUCAO", False),
+        ("LABDES/UFCG Avenida Aprigio Veloso, 882, Bairro Universitario,", False),
+        ("Campina Grande PB CEP 58.429-000", False),
+        ("", False),
+        ("Termo de Protocolo SECTIES/FAPESQ no 0001/2023 - CUSTEIO DO PROJETO", False),
+        ("ELETROLISADOR COM ELETRODOS POROSOS DE NIQUEL, PARA PRODUCAO", False),
+        ("E QUEIMA DE HIDROGENIO VERDE EM FORNOS DE BAIXA E ALTA", False),
+        ("TEMPERATURA", False),
+        ("Titulo do Projeto: DESENVOLVIMENTO DE UM ELETROLISADOR COM", False),
+        ("ELETRODOS POROSOS DE NIQUEL, PARA PRODUCAO E QUEIMA DE", False),
+        ("HIDROGENIO VERDE EM FORNOS DE BAIXA E ALTA TEMPERATURA", False),
+    ]
+
+def construir_pdf_dados_adicionais_fornecedor(rubrica, tipos_itens=None) -> bytes:
+    largura = 595
+    altura = 842
+    margem = 42
+    y = altura - margem
+    tamanho_fonte = 12
+    entrelinha = 16
+    comandos = [
+        "BT /F1 12 Tf 14 TL ET",
+        "0.8 w",
+        f"{margem - 4} {margem - 12} {largura - (2 * margem) + 8} {altura - (2 * margem) + 20} re S",
+    ]
+
+    for texto, destacar in texto_dados_adicionais_fornecedor(rubrica, tipos_itens):
+        linhas = quebrar_linha_pdf(texto, 78)
+        for indice, linha in enumerate(linhas):
+            if y < margem + entrelinha:
+                break
+            if destacar and linha:
+                largura_destaque = min(max(len(linha) * 6.4, 80), largura - (2 * margem))
+                comandos.append(f"1 0.9 0 rg {margem - 1} {y - 3} {largura_destaque:.1f} 14 re f 0 0 0 rg")
+            fonte = "/F1 18 Tf" if texto == "Dados adicionais" and indice == 0 else f"/F1 {tamanho_fonte} Tf"
+            comandos.append(f"BT {fonte} {margem} {y} Td ({pdf_escape(linha)}) Tj ET")
+            y -= 22 if texto == "Dados adicionais" and indice == 0 else entrelinha
+        if texto == "":
+            y -= 6
+
+    stream = "\n".join(comandos).encode("cp1252", errors="replace")
+    objetos = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {largura} {altura}] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".encode("ascii"),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream",
+    ]
+    pdf = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for numero, objeto in enumerate(objetos, start=1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{numero} 0 obj\n".encode("ascii"))
+        pdf.extend(objeto)
+        pdf.extend(b"\nendobj\n")
+    xref = len(pdf)
+    pdf.extend(f"xref\n0 {len(objetos) + 1}\n".encode("ascii"))
+    pdf.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        pdf.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    pdf.extend(f"trailer\n<< /Size {len(objetos) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode("ascii"))
+    return bytes(pdf)
+
 COLUNAS_AUDITORIA = {
     "pedido_item_id": "Item do pedido (ID)",
     "compra_id": "Compra",
@@ -3910,6 +4019,24 @@ elif menu == "compra_nota":
         use_container_width=True,
         hide_index=True,
     )
+    rubrica_pdf_df = query("select codigo, nome, tipo from rubricas where id=%s", (rubrica_compra_id,))
+    if len(rubrica_pdf_df):
+        rubrica_pdf = rubrica_pdf_df.iloc[0].to_dict()
+        fornecedor_pdf = (
+            str(itens_cotacao_selecionada["fornecedor"].iloc[0] or "fornecedor").strip()
+            if len(itens_cotacao_selecionada)
+            else "fornecedor"
+        )
+        st.download_button(
+            "Gerar PDF para fornecedor vencedor",
+            data=construir_pdf_dados_adicionais_fornecedor(
+                rubrica_pdf,
+                itens_cotacao_selecionada["tipo_item"].dropna().tolist() if len(itens_cotacao_selecionada) else [],
+            ),
+            file_name=f"dados_adicionais_{nome_seguro_drive(fornecedor_pdf)}_{date.today().isoformat()}.pdf",
+            mime="application/pdf",
+            key=f"pdf_dados_adicionais_fornecedor_{rubrica_compra_id}_{cotacao_vencedora_id}",
+        )
 
     if st.button("Registrar compra"):
         if len(itens_cotacao_selecionada) == 0:
