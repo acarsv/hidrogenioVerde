@@ -989,7 +989,8 @@ def ensure_financial_governance_schema():
             count(*) as total_cotacoes,
             count(*) filter (where ci.vencedor = true) as total_vencedoras,
             max(c.fornecedor) filter (where ci.vencedor = true) as fornecedor_vencedor,
-            sum(ci.valor_total) filter (where ci.vencedor = true) as valor_cotado_vencedor
+            sum(ci.valor_total) filter (where ci.vencedor = true) as valor_cotado_vencedor,
+            min(ci.valor_total) as menor_valor_cotado
         from cotacao_itens ci
         join cotacoes c on c.id = ci.cotacao_id
         where ci.pedido_item_id is not null
@@ -1060,6 +1061,7 @@ def ensure_financial_governance_schema():
         coalesce(cr.total_vencedoras, 0) as total_vencedoras,
         cr.fornecedor_vencedor,
         coalesce(cr.valor_cotado_vencedor, 0) as valor_cotado_vencedor,
+        coalesce(cr.menor_valor_cotado, 0) as menor_valor_cotado,
 
         coalesce(nr.total_itens_nf, 0) as total_itens_nf,
         nr.notas_fiscais,
@@ -1526,6 +1528,115 @@ def construir_planilha_itens_comprados(df: pd.DataFrame) -> bytes:
     arquivo.seek(0)
     return arquivo.getvalue()
 
+def pdf_escape(texto) -> str:
+    return (
+        str(texto or "")
+        .replace("\\", "\\\\")
+        .replace("(", "\\(")
+        .replace(")", "\\)")
+    )
+
+def quebrar_linha_pdf(texto: str, max_chars: int = 78) -> list[str]:
+    linhas = []
+    for paragrafo in str(texto or "").splitlines() or [""]:
+        palavras = paragrafo.split()
+        if not palavras:
+            linhas.append("")
+            continue
+        linha = palavras[0]
+        for palavra in palavras[1:]:
+            if len(linha) + 1 + len(palavra) <= max_chars:
+                linha += f" {palavra}"
+            else:
+                linhas.append(linha)
+                linha = palavra
+        linhas.append(linha)
+    return linhas
+
+def tipo_material_para_pdf(tipo_rubrica: str, tipos_itens=None) -> str:
+    tipo = str(tipo_rubrica or "").lower()
+    tipos = {str(valor or "").lower() for valor in (tipos_itens or [])}
+    if "permanente" in tipo or "permanente" in tipos:
+        return "MATERIAL PERMANENTE"
+    if "consumo" in tipo or "consumo" in tipos:
+        return "MATERIAL DE CONSUMO"
+    return "MATERIAL"
+
+def texto_dados_adicionais_fornecedor(rubrica, tipos_itens=None) -> list[tuple[str, bool]]:
+    tipo_material = tipo_material_para_pdf(rubrica.get("tipo"), tipos_itens)
+    rubrica_texto = f"{rubrica.get('codigo', '')} - {rubrica.get('nome', '')}".strip(" -")
+    return [
+        ("Dados adicionais", False),
+        ("Observacoes", False),
+        ("Empresa optante pelo simples nacional, sem direito a credito de ICMS E IPI.", False),
+        ("PAGAMENTO: A VISTA", False),
+        ("PIX: XXXXXX", True),
+        ("", False),
+        (f"PARTE DO {tipo_material}: {rubrica_texto}", True),
+        ("", False),
+        ("LOCAL DE ENTREGA / EXECUCAO", False),
+        ("LABDES/UFCG Avenida Aprigio Veloso, 882, Bairro Universitario,", False),
+        ("Campina Grande PB CEP 58.429-000", False),
+        ("", False),
+        ("Termo de Protocolo SECTIES/FAPESQ no 0001/2023 - CUSTEIO DO PROJETO", False),
+        ("ELETROLISADOR COM ELETRODOS POROSOS DE NIQUEL, PARA PRODUCAO", False),
+        ("E QUEIMA DE HIDROGENIO VERDE EM FORNOS DE BAIXA E ALTA", False),
+        ("TEMPERATURA", False),
+        ("Titulo do Projeto: DESENVOLVIMENTO DE UM ELETROLISADOR COM", False),
+        ("ELETRODOS POROSOS DE NIQUEL, PARA PRODUCAO E QUEIMA DE", False),
+        ("HIDROGENIO VERDE EM FORNOS DE BAIXA E ALTA TEMPERATURA", False),
+    ]
+
+def construir_pdf_dados_adicionais_fornecedor(rubrica, tipos_itens=None) -> bytes:
+    largura = 595
+    altura = 842
+    margem = 42
+    y = altura - margem
+    tamanho_fonte = 12
+    entrelinha = 16
+    comandos = [
+        "BT /F1 12 Tf 14 TL ET",
+        "0.8 w",
+        f"{margem - 4} {margem - 12} {largura - (2 * margem) + 8} {altura - (2 * margem) + 20} re S",
+    ]
+
+    for texto, destacar in texto_dados_adicionais_fornecedor(rubrica, tipos_itens):
+        linhas = quebrar_linha_pdf(texto, 78)
+        for indice, linha in enumerate(linhas):
+            if y < margem + entrelinha:
+                break
+            if destacar and linha:
+                largura_destaque = min(max(len(linha) * 6.4, 80), largura - (2 * margem))
+                comandos.append(f"1 0.9 0 rg {margem - 1} {y - 3} {largura_destaque:.1f} 14 re f 0 0 0 rg")
+            fonte = "/F1 18 Tf" if texto == "Dados adicionais" and indice == 0 else f"/F1 {tamanho_fonte} Tf"
+            comandos.append(f"BT {fonte} {margem} {y} Td ({pdf_escape(linha)}) Tj ET")
+            y -= 22 if texto == "Dados adicionais" and indice == 0 else entrelinha
+        if texto == "":
+            y -= 6
+
+    stream = "\n".join(comandos).encode("cp1252", errors="replace")
+    objetos = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {largura} {altura}] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".encode("ascii"),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream",
+    ]
+    pdf = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for numero, objeto in enumerate(objetos, start=1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{numero} 0 obj\n".encode("ascii"))
+        pdf.extend(objeto)
+        pdf.extend(b"\nendobj\n")
+    xref = len(pdf)
+    pdf.extend(f"xref\n0 {len(objetos) + 1}\n".encode("ascii"))
+    pdf.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        pdf.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    pdf.extend(f"trailer\n<< /Size {len(objetos) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode("ascii"))
+    return bytes(pdf)
+
 COLUNAS_AUDITORIA = {
     "pedido_item_id": "Item do pedido (ID)",
     "compra_id": "Compra",
@@ -1575,6 +1686,7 @@ COLUNAS_AUDITORIA = {
     "valor_utilizado": "Valor utilizado",
     "saldo_restante": "Saldo restante",
     "valor_cotado_vencedor": "Valor cotado vencedor",
+    "menor_valor_cotado": "Menor valor cotado",
     "valor_nf_item": "Valor do item na NF",
     "valor_economia": "Valor economizado",
     "valor_nota": "Valor da nota",
@@ -1594,6 +1706,7 @@ COLUNAS_VALOR_AUDITORIA = {
     "Valor utilizado",
     "Saldo restante",
     "Valor cotado vencedor",
+    "Menor valor cotado",
     "Valor do item na NF",
     "Valor economizado",
     "Valor da nota",
@@ -2297,6 +2410,94 @@ def ajustar_valor_solicitado_para_nf(pedido_item_id, usuario_id):
                 (
                     f"Valor solicitado do item ajustado para o valor da NF: {descricao_item}. "
                     f"De R$ {valor_solicitado:.2f} para R$ {valor_nf_item:.2f}."
+                ),
+            ))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    sincronizar_orcamento()
+
+
+def ajustar_valor_estimado_para_menor_cotacao(pedido_item_id, usuario_id):
+    conn = get_conn()
+    conn.autocommit = False
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+            select
+                pi.id,
+                pi.pedido_id,
+                pi.descricao,
+                pi.quantidade,
+                pi.valor_total as valor_estimado_atual,
+                s.status as status_solicitacao,
+                (
+                    select min(ci.valor_total)
+                    from cotacao_itens ci
+                    where ci.pedido_item_id = pi.id
+                ) as menor_valor_cotado
+            from pedido_itens pi
+            join solicitacoes_compra s on s.id = pi.pedido_id
+            where pi.id=%s
+            """, (pedido_item_id,))
+            item = cur.fetchone()
+            if not item:
+                raise ValueError("Item do pedido nao encontrado.")
+
+            quantidade = Decimal(str(item["quantidade"] or 0))
+            valor_estimado_atual = Decimal(str(item["valor_estimado_atual"] or 0))
+            menor_valor_cotado = Decimal(str(item["menor_valor_cotado"] or 0))
+            if quantidade <= 0:
+                raise ValueError("Quantidade do item deve ser maior que zero.")
+            if menor_valor_cotado <= 0:
+                raise ValueError("Nao existem cotacoes validas para ajustar este item.")
+            if menor_valor_cotado <= valor_estimado_atual:
+                raise ValueError("O menor valor cotado nao e maior que o valor estimado atual.")
+
+            novo_valor_unitario = (menor_valor_cotado / quantidade).quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            )
+            solicitacao_id = int(item["pedido_id"])
+
+            cur.execute("""
+            update pedido_itens
+            set valor_unitario=%s
+            where id=%s
+            """, (novo_valor_unitario, pedido_item_id))
+
+            cur.execute("""
+            update solicitacoes_compra s
+            set valor_estimado = totais.valor_total,
+                quantidade = totais.quantidade_total,
+                atualizado_em = now()
+            from (
+                select
+                    pedido_id,
+                    coalesce(sum(valor_total), 0) as valor_total,
+                    coalesce(sum(quantidade), 0) as quantidade_total
+                from pedido_itens
+                where pedido_id=%s
+                group by pedido_id
+            ) totais
+            where s.id = totais.pedido_id
+            """, (solicitacao_id,))
+
+            cur.execute("""
+            insert into historico_status (solicitacao_id,status_novo,usuario_id,observacao)
+            values (%s,%s,%s,%s)
+            """, (
+                solicitacao_id,
+                item["status_solicitacao"],
+                usuario_id,
+                (
+                    f"Auditoria confirmou ajuste do valor estimado para o menor valor cotado: "
+                    f"{item['descricao']}. De R$ {valor_estimado_atual:.2f} "
+                    f"para R$ {menor_valor_cotado:.2f}."
                 ),
             ))
         conn.commit()
@@ -3910,6 +4111,24 @@ elif menu == "compra_nota":
         use_container_width=True,
         hide_index=True,
     )
+    rubrica_pdf_df = query("select codigo, nome, tipo from rubricas where id=%s", (rubrica_compra_id,))
+    if len(rubrica_pdf_df):
+        rubrica_pdf = rubrica_pdf_df.iloc[0].to_dict()
+        fornecedor_pdf = (
+            str(itens_cotacao_selecionada["fornecedor"].iloc[0] or "fornecedor").strip()
+            if len(itens_cotacao_selecionada)
+            else "fornecedor"
+        )
+        st.download_button(
+            "Gerar PDF para fornecedor vencedor",
+            data=construir_pdf_dados_adicionais_fornecedor(
+                rubrica_pdf,
+                itens_cotacao_selecionada["tipo_item"].dropna().tolist() if len(itens_cotacao_selecionada) else [],
+            ),
+            file_name=f"dados_adicionais_{nome_seguro_drive(fornecedor_pdf)}_{date.today().isoformat()}.pdf",
+            mime="application/pdf",
+            key=f"pdf_dados_adicionais_fornecedor_{rubrica_compra_id}_{cotacao_vencedora_id}",
+        )
 
     if st.button("Registrar compra"):
         if len(itens_cotacao_selecionada) == 0:
@@ -4799,6 +5018,7 @@ elif menu == "auditoria":
                     "total_vencedoras",
                     "fornecedor_vencedor",
                     "valor_solicitado",
+                    "menor_valor_cotado",
                     "valor_cotado_vencedor",
                     "valor_economia",
                 ]].copy()
@@ -4876,6 +5096,7 @@ elif menu == "auditoria":
                             "descricao",
                             "tipo_item",
                             "valor_solicitado",
+                            "menor_valor_cotado",
                             "valor_cotado_vencedor",
                             "valor_nf_item",
                             "valor_economia",
@@ -4884,6 +5105,49 @@ elif menu == "auditoria":
                         use_container_width=True,
                         hide_index=True,
                     )
+                    problemas_estimativa = problemas[
+                        problemas["status_auditoria"].str.contains(
+                            "valor cotado maior",
+                            case=False,
+                            na=False,
+                        )
+                        & (problemas["menor_valor_cotado"].fillna(0) > 0)
+                        & (
+                            problemas["menor_valor_cotado"].fillna(0)
+                            - problemas["valor_solicitado"].fillna(0)
+                            > 0.01
+                        )
+                    ].copy()
+                    if not problemas_estimativa.empty:
+                        st.markdown("#### Confirmar estimativa pelo menor valor cotado")
+                        st.info(
+                            "Use este ajuste quando a pesquisa de mercado comprovar que o valor "
+                            "estimado ficou abaixo de todas as cotacoes recebidas."
+                        )
+                        item_estimativa_id = st.selectbox(
+                            "Item com estimativa abaixo do mercado",
+                            problemas_estimativa["pedido_item_id"].tolist(),
+                            format_func=lambda item_id: (
+                                f"Solicitacao {problemas_estimativa.loc[problemas_estimativa.pedido_item_id == item_id, 'solicitacao_id'].iloc[0]} - "
+                                f"{problemas_estimativa.loc[problemas_estimativa.pedido_item_id == item_id, 'descricao'].iloc[0]} - "
+                                f"Estimado {format_currency_brl(problemas_estimativa.loc[problemas_estimativa.pedido_item_id == item_id, 'valor_solicitado'].iloc[0])} / "
+                                f"Menor cotacao {format_currency_brl(problemas_estimativa.loc[problemas_estimativa.pedido_item_id == item_id, 'menor_valor_cotado'].iloc[0])}"
+                            ),
+                            key="auditoria_item_ajustar_estimativa",
+                        )
+                        confirmar_estimativa = st.checkbox(
+                            "Confirmo que o menor valor cotado representa o menor preco de mercado e deve substituir o valor estimado.",
+                            key="confirmar_ajuste_estimativa_cotacao",
+                        )
+                        if st.button("Ajustar estimativa para menor valor cotado", type="primary"):
+                            if not confirmar_estimativa:
+                                st.error("Marque a confirmacao do auditor antes de ajustar a estimativa.")
+                            else:
+                                ajustar_valor_estimado_para_menor_cotacao(item_estimativa_id, user["id"])
+                                st.success(
+                                    "Valor estimado ajustado para o menor valor cotado e confirmacao registrada no historico."
+                                )
+                                st.rerun()
                     problemas_retorno = problemas[
                         problemas["status_auditoria"].str.contains(
                             "valor cotado maior|valor da NF maior|fornecedor da NF diverge|mais de um vencedor",
