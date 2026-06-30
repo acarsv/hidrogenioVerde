@@ -2877,21 +2877,14 @@ if menu == "orcamento":
     percentual_compras_global = round((float(total_compras_periodo) * 100.0 / float(total_orcado)), 2) if float(total_orcado or 0) > 0 else 0
     eficiencia_compras = round((percentual_compras_global * 100.0 / percentual_tempo_prestacao), 2) if percentual_tempo_prestacao > 0 else 0
     risco_prazo_global = classificar_risco_prazo(percentual_compras_global, percentual_tempo_prestacao, total_disponivel, False)
-    saldo_residual_total = df.saldo_residual.sum()
-    rubricas_criticas = df["status_financeiro"].isin(["Critico", "Residual", "Encerrado"]).sum()
-
     c1, c2, c3 = st.columns(3)
     c1.metric("Total orçado", format_currency_brl(total_orcado))
     c2.metric("Total reservado", format_currency_brl(total_reservado))
     c3.metric("Total utilizado", format_currency_brl(total_utilizado))
     c4, c5, c6 = st.columns(3)
     c4.metric("Disponível operacional", format_currency_brl(total_disponivel))
-    c5.metric("Saldo residual", format_currency_brl(saldo_residual_total))
-    c6.metric("Rubricas críticas", int(rubricas_criticas))
-    c7, c8, c9 = st.columns(3)
-    c7.metric("Diferença sem reserva técnica", format_currency_brl(diferenca_sem_reserva_tecnica))
-    c8.metric("Reserva técnica", format_currency_brl(total_reserva_tecnica))
-    c9.metric("Total residual", format_currency_brl(saldo_residual_total))
+    c5.metric("Diferença sem reserva técnica", format_currency_brl(diferenca_sem_reserva_tecnica))
+    c6.metric("Reserva técnica", format_currency_brl(total_reserva_tecnica))
 
     st.markdown("### Sinalização inteligente de compras")
     p1, p2, p3, p4 = st.columns(4)
