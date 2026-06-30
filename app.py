@@ -2953,10 +2953,16 @@ if menu == "orcamento":
     })
     df_orcamento["Índice comprometido"] = pd.to_numeric(df_orcamento["Índice comprometido"], errors="coerce").fillna(0)
     df_orcamento["Progresso das compras"] = pd.to_numeric(df_orcamento["Progresso das compras"], errors="coerce").fillna(0)
+    df_orcamento["Valor disponível real"] = (
+        pd.to_numeric(df_orcamento["Valor orçado"], errors="coerce").fillna(0)
+        - pd.to_numeric(df_orcamento["Valor utilizado"], errors="coerce").fillna(0)
+        - pd.to_numeric(df_orcamento["Valor reservado"], errors="coerce").fillna(0)
+    )
     for coluna in [
         "Valor orçado",
         "Valor reservado",
         "Valor utilizado",
+        "Valor disponível real",
         "Compras executadas",
         "Reserva técnica",
         "Mínimo operacional",
@@ -2976,13 +2982,14 @@ if menu == "orcamento":
         "Valor orçado",
         "Valor utilizado",
         "Disponível operacional",
+        "Reserva técnica",
+        "Valor reservado",
+        "Valor disponível real",
         "Progresso das compras",
         "Sinal prazo",
         "Status financeiro",
         "Risco",
         "Risco prazo",
-        "Valor reservado",
-        "Reserva técnica",
         "Compras executadas",
         "Índice comprometido",
         "Percentual utilizado",
