@@ -3612,10 +3612,33 @@ elif menu == "cotacoes":
             solicitacoes_default = [solicitacao_foco]
         else:
             solicitacoes_default = [solicitacoes_ids[0]]
+        lote_ids_texto = st.text_input(
+            "Selecionar lote por IDs",
+            value="",
+            placeholder="Ex.: 3-60,70",
+            key=f"cotacao_lote_ids_{rubrica_id}",
+        )
+        lote_ids_parseados = []
+        lote_ids_invalidos = []
+        for parte in str(lote_ids_texto or "").replace(" ", "").split(","):
+            if not parte:
+                continue
+            try:
+                if "-" in parte:
+                    inicio, fim = parte.split("-", 1)
+                    inicio, fim = int(inicio), int(fim)
+                    if inicio > fim:
+                        inicio, fim = fim, inicio
+                    lote_ids_parseados.extend(range(inicio, fim + 1))
+                else:
+                    lote_ids_parseados.append(int(parte))
+            except ValueError:
+                lote_ids_invalidos.append(parte)
+        lote_ids_parseados = [valor for valor in dict.fromkeys(lote_ids_parseados) if valor in solicitacoes_ids]
         selected_sids = st.multiselect(
             "Solicitacoes do lote de cotacao",
             solicitacoes_ids,
-            default=solicitacoes_default,
+            default=lote_ids_parseados or solicitacoes_default,
             format_func=lambda valor: (
                 f"#{int(valor)} - "
                 f"{solicitacoes_rubrica.loc[solicitacoes_rubrica.id == valor, 'descricao'].iloc[0][:90]} - "
@@ -3623,6 +3646,11 @@ elif menu == "cotacoes":
             ),
             key=f"cotacao_solicitacoes_{rubrica_id}",
         )
+        if lote_ids_invalidos:
+            st.warning(f"IDs invalidos ignorados: {', '.join(lote_ids_invalidos)}")
+        if lote_ids_texto and lote_ids_parseados:
+            selected_sids = lote_ids_parseados
+            st.caption(f"Lote selecionado pelo campo de IDs: {', '.join('#' + str(valor) for valor in selected_sids)}")
         if not selected_sids:
             st.warning("Selecione pelo menos uma solicitacao para cadastrar a cotacao.")
             st.stop()
