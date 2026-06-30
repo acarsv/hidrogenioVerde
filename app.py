@@ -1871,7 +1871,17 @@ def atualizar_responsaveis_dialog():
 @st.dialog("Remanejar saldo")
 def remanejar_saldo_dialog(usuario_id):
     rubricas = query("""
-    select id, codigo, nome, valor_orcado, valor_reservado, valor_utilizado, reserva_tecnica_percentual, reserva_tecnica, saldo_disponivel
+    select
+      id,
+      codigo,
+      nome,
+      valor_orcado,
+      valor_reservado,
+      valor_utilizado,
+      reserva_tecnica_percentual,
+      reserva_tecnica,
+      saldo_disponivel,
+      saldo_disponivel + reserva_tecnica as disponivel_total
     from vw_orcamento
     where encerrada = false
     order by codigo
@@ -1892,9 +1902,15 @@ def remanejar_saldo_dialog(usuario_id):
     destino_id = st.selectbox("Rubrica destino", rubricas["id"].tolist(), format_func=label_rubrica)
     rubrica_origem = rubricas.loc[rubricas.id == origem_id].iloc[0]
     saldo_origem = Decimal(str(rubrica_origem["saldo_disponivel"]))
-    valor_maximo = float(max(saldo_origem, Decimal("0.01")))
-    valor = st.number_input("Valor operacional a remanejar", min_value=0.01, max_value=valor_maximo, value=0.01, step=100.0)
-    st.caption("O valor informado e abatido do disponivel operacional. O sistema ajusta o valor orcado considerando a reserva tecnica.")
+    reserva_origem = Decimal(str(rubrica_origem["reserva_tecnica"]))
+    disponivel_total_origem = Decimal(str(rubrica_origem["disponivel_total"]))
+    valor_maximo = float(max(disponivel_total_origem, Decimal("0.01")))
+    valor = st.number_input("Valor total a remanejar", min_value=0.01, max_value=valor_maximo, value=0.01, step=100.0)
+    st.caption(
+        f"Disponivel operacional: {format_currency_brl(saldo_origem)} | "
+        f"Reserva tecnica disponivel: {format_currency_brl(reserva_origem)} | "
+        f"Total disponivel para remanejamento: {format_currency_brl(disponivel_total_origem)}."
+    )
     justificativa = st.text_area("Justificativa formal")
 
     c1, c2 = st.columns(2)
@@ -1902,22 +1918,25 @@ def remanejar_saldo_dialog(usuario_id):
         valor_decimal = Decimal(str(valor))
         if origem_id == destino_id:
             st.error("A rubrica de origem deve ser diferente da rubrica de destino.")
-        elif valor_decimal > saldo_origem:
-            st.error("O valor informado supera o saldo disponivel da rubrica de origem.")
+        elif valor_decimal > disponivel_total_origem:
+            st.error("O valor informado supera o total disponivel da rubrica de origem.")
         elif not justificativa.strip():
             st.error("Informe uma justificativa para auditoria.")
         else:
             remanejamento_id = str(uuid4())
-            valor_orcado_movimentado = valor_orcado_para_reduzir_saldo_operacional(
-                valor_decimal,
-                rubrica_origem["valor_orcado"],
-                rubrica_origem["reserva_tecnica_percentual"],
-                rubrica_origem["saldo_disponivel"],
-                rubrica_origem["valor_reservado"],
-                rubrica_origem["valor_utilizado"],
-            )
+            if valor_decimal <= saldo_origem:
+                valor_orcado_movimentado = valor_orcado_para_reduzir_saldo_operacional(
+                    valor_decimal,
+                    rubrica_origem["valor_orcado"],
+                    rubrica_origem["reserva_tecnica_percentual"],
+                    rubrica_origem["saldo_disponivel"],
+                    rubrica_origem["valor_reservado"],
+                    rubrica_origem["valor_utilizado"],
+                )
+            else:
+                valor_orcado_movimentado = valor_decimal
             justificativa_auditoria = (
-                f"{justificativa.strip()} | Valor operacional informado: {format_currency_brl(valor_decimal)}. "
+                f"{justificativa.strip()} | Valor total informado: {format_currency_brl(valor_decimal)}. "
                 f"Valor orcado movimentado com reserva tecnica: {format_currency_brl(valor_orcado_movimentado)}."
             )
             execute("update rubricas set valor_orcado = valor_orcado - %s where id = %s", (valor_orcado_movimentado, int(origem_id)))
