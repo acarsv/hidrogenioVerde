@@ -1831,7 +1831,7 @@ def atualizar_responsaveis_dialog():
 @st.dialog("Remanejar saldo")
 def remanejar_saldo_dialog(usuario_id):
     rubricas = query("""
-    select id, codigo, nome, valor_orcado, valor_reservado, valor_utilizado, reserva_tecnica_percentual, saldo_disponivel
+    select id, codigo, nome, valor_orcado, valor_reservado, valor_utilizado, reserva_tecnica_percentual, reserva_tecnica, saldo_disponivel
     from vw_orcamento
     where encerrada = false
     order by codigo
@@ -1842,7 +1842,11 @@ def remanejar_saldo_dialog(usuario_id):
 
     def label_rubrica(item_id):
         rubrica = rubricas.loc[rubricas.id == item_id].iloc[0]
-        return f"{rubrica['codigo']} - {rubrica['nome']} ({format_currency_brl(rubrica['saldo_disponivel'])})"
+        return (
+            f"{rubrica['codigo']} - {rubrica['nome']} "
+            f"({format_currency_brl(rubrica['saldo_disponivel'])}) "
+            f"(+ {format_currency_brl(rubrica['reserva_tecnica'])})"
+        )
 
     origem_id = st.selectbox("Rubrica origem", rubricas["id"].tolist(), format_func=label_rubrica)
     destino_id = st.selectbox("Rubrica destino", rubricas["id"].tolist(), format_func=label_rubrica)
