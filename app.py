@@ -981,6 +981,46 @@ def ensure_financial_governance_schema():
         execute("alter table movimentacoes_orcamento add column estornado_por uuid references usuarios_app(id)")
 
     execute("""
+    create or replace view vw_historico_remanejamentos as
+    select
+      saida.remanejamento_id,
+      saida.criado_em,
+      coalesce(usuario.nome, 'Sistema') as usuario,
+      origem.codigo as origem_codigo,
+      origem.nome as origem_nome,
+      destino.codigo as destino_codigo,
+      destino.nome as destino_nome,
+      saida.valor,
+      saida.justificativa,
+      case
+        when saida.estornado_em is not null or entrada.estornado_em is not null then 'estornado'
+        else 'ativo'
+      end as status,
+      coalesce(saida.estornado_em, entrada.estornado_em) as estornado_em,
+      coalesce(usuario_estorno.nome, 'Sistema') as estornado_por,
+      retorno.criado_em as retorno_em,
+      retorno.justificativa as justificativa_retorno
+    from movimentacoes_orcamento saida
+    join movimentacoes_orcamento entrada
+      on entrada.remanejamento_id = saida.remanejamento_id
+     and entrada.operacao = 'remanejamento_entrada'
+    join rubricas origem on origem.id = saida.rubrica_id
+    join rubricas destino on destino.id = entrada.rubrica_id
+    left join usuarios_app usuario on usuario.id = saida.usuario_id
+    left join usuarios_app usuario_estorno on usuario_estorno.id = coalesce(saida.estornado_por, entrada.estornado_por)
+    left join lateral (
+      select criado_em, justificativa
+      from movimentacoes_orcamento retorno
+      where retorno.remanejamento_id = saida.remanejamento_id
+        and retorno.operacao = 'retorno_remanejamento_saida'
+      order by retorno.criado_em desc, retorno.id desc
+      limit 1
+    ) retorno on true
+    where saida.operacao = 'remanejamento_saida'
+      and saida.remanejamento_id is not null
+    """)
+
+    execute("""
     create or replace view vw_orcamento as
     select
       r.id,
@@ -2126,6 +2166,33 @@ def encerrar_rubrica_dialog(usuario_id):
 
 @st.dialog("Historico/Auditoria")
 def historico_orcamento_dialog():
+    remanejamentos = query("""
+    select
+      criado_em as "Data",
+      remanejamento_id as "ID",
+      usuario as "Usuario",
+      origem_codigo || ' - ' || origem_nome as "Origem",
+      destino_codigo || ' - ' || destino_nome as "Destino",
+      valor as "Valor",
+      status as "Status",
+      estornado_em as "Estornado em",
+      retorno_em as "Retorno em",
+      justificativa as "Justificativa",
+      justificativa_retorno as "Justificativa retorno"
+    from vw_historico_remanejamentos
+    order by criado_em desc
+    """)
+    st.markdown("### Historico de remanejamentos")
+    if len(remanejamentos) == 0:
+        st.info("Ainda nao ha remanejamentos registrados.")
+    else:
+        remanejamentos["Valor"] = remanejamentos["Valor"].apply(format_currency_brl)
+        for coluna in ["Data", "Estornado em", "Retorno em"]:
+            remanejamentos[coluna] = pd.to_datetime(remanejamentos[coluna], errors="coerce").dt.strftime("%d/%m/%Y %H:%M").fillna("")
+        remanejamentos["Status"] = remanejamentos["Status"].apply(normalizar_texto_portugues)
+        st.dataframe(remanejamentos, use_container_width=True, hide_index=True)
+
+    st.markdown("### Todas as movimentacoes")
     historico = query("""
     select
       m.criado_em as "Data",
@@ -2144,6 +2211,8 @@ def historico_orcamento_dialog():
         st.info("Ainda nao ha movimentacoes orcamentarias registradas.")
         return
     historico["Valor"] = historico["Valor"].apply(format_currency_brl)
+    historico["Data"] = pd.to_datetime(historico["Data"], errors="coerce").dt.strftime("%d/%m/%Y %H:%M").fillna("")
+    historico["Operacao"] = historico["Operacao"].apply(normalizar_texto_portugues)
     st.dataframe(historico, use_container_width=True, hide_index=True)
 
 def exibir_detalhe_rubrica(rubrica):
