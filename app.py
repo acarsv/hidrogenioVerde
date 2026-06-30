@@ -5976,12 +5976,16 @@ elif menu == "itens_comprados":
                 total_salvas = 0
                 total_deletadas = 0
                 erros = []
-                for _, linha in linhas_acao.iterrows():
-                    item_nf_id = int(linha["_item_nf_id"])
-                    nota_fiscal_id = int(linha["_nota_fiscal_id"])
-                    compra_id = linha["_compra_id"]
-                    rubrica_id = linha["_rubrica_id"]
+                for indice_linha, linha in linhas_acao.iterrows():
+                    if indice_linha not in editor_df.index:
+                        erros.append("Linha sem identificador interno. Recarregue a pagina e tente novamente.")
+                        continue
+                    linha_original = editor_df.loc[indice_linha]
                     try:
+                        item_nf_id = int(linha_original["_item_nf_id"])
+                        nota_fiscal_id = int(linha_original["_nota_fiscal_id"])
+                        compra_id = linha_original["_compra_id"]
+                        rubrica_id = linha_original["_rubrica_id"]
                         if linha["Ação"] == "Deletar":
                             execute("delete from nota_fiscal_itens where id=%s", (item_nf_id,))
                             recalcular_totais_nota_compra(nota_fiscal_id, compra_id)
@@ -6023,7 +6027,8 @@ elif menu == "itens_comprados":
                             recalcular_totais_nota_compra(nota_fiscal_id, compra_id)
                             total_salvas += 1
                     except Exception as exc:
-                        erros.append(f"Linha item NF #{item_nf_id}: {exc}")
+                        item_erro = linha_original.get("_item_nf_id", indice_linha)
+                        erros.append(f"Linha item NF #{item_erro}: {exc}")
                 sincronizar_orcamento()
                 if total_salvas or total_deletadas:
                     st.success(f"Ações aplicadas: {total_salvas} salva(s), {total_deletadas} deletada(s).")
