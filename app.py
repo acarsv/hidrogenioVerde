@@ -3358,22 +3358,228 @@ elif menu == "solicitacoes":
                 st.rerun()
 
 elif menu == "cotacoes":
+    if "cotacoes_visao" not in st.session_state:
+        st.session_state["cotacoes_visao"] = "Cadastrar/editar cotacoes"
+    opcoes_visao_cotacoes = ["Cadastrar/editar cotacoes", "Compras com cotacoes"]
+    if st.session_state.get("cotacoes_visao_widget") != st.session_state["cotacoes_visao"]:
+        st.session_state["cotacoes_visao_widget"] = st.session_state["cotacoes_visao"]
+    visao_index = opcoes_visao_cotacoes.index(st.session_state["cotacoes_visao"]) if st.session_state["cotacoes_visao"] in opcoes_visao_cotacoes else 0
+    visao_cotacoes = st.radio(
+        "Visao",
+        opcoes_visao_cotacoes,
+        index=visao_index,
+        horizontal=True,
+        key="cotacoes_visao_widget",
+    )
+    st.session_state["cotacoes_visao"] = visao_cotacoes
+
+    if visao_cotacoes == "Compras com cotacoes":
+        compras_cotacoes = query("""
+        select
+          c.id as compra_id,
+          c.solicitacao_id,
+          c.cotacao_vencedora_id,
+          c.valor_compra,
+          c.comprado_em,
+          s.descricao as solicitacao,
+          s.status,
+          r.id as rubrica_id,
+          r.codigo as rubrica_codigo,
+          r.nome as rubrica_nome,
+          count(distinct co.id) as total_cotacoes,
+          count(distinct co.id) filter (where co.vencedora = true) as total_vencedoras,
+          string_agg(distinct co.fornecedor, ', ' order by co.fornecedor) as fornecedores
+        from compras c
+        join solicitacoes_compra s on s.id = c.solicitacao_id
+        join rubricas r on r.id = s.rubrica_id
+        left join cotacoes co on (
+            co.rubrica_id = r.id
+            or (co.rubrica_id is null and co.solicitacao_id = s.id)
+        )
+        where s.status <> 'cancelado'
+        group by c.id, c.solicitacao_id, c.cotacao_vencedora_id, c.valor_compra, c.comprado_em, s.descricao, s.status, r.id, r.codigo, r.nome
+        order by c.comprado_em desc, c.id desc
+        """)
+        if len(compras_cotacoes) == 0:
+            st.info("Ainda nao ha compras registradas para conferir cotacoes.")
+            st.stop()
+
+        resumo_compras = compras_cotacoes[[
+            "compra_id",
+            "solicitacao_id",
+            "rubrica_codigo",
+            "rubrica_nome",
+            "solicitacao",
+            "status",
+            "valor_compra",
+            "total_cotacoes",
+            "total_vencedoras",
+            "fornecedores",
+        ]].copy()
+        resumo_compras = resumo_compras.rename(columns={
+            "compra_id": "Compra",
+            "solicitacao_id": "Solicitacao",
+            "rubrica_codigo": "Rubrica",
+            "rubrica_nome": "Nome da rubrica",
+            "solicitacao": "Descricao",
+            "status": "Status",
+            "valor_compra": "Valor da compra",
+            "total_cotacoes": "Cotacoes",
+            "total_vencedoras": "Vencedoras",
+            "fornecedores": "Fornecedores cotados",
+        })
+        resumo_compras["Valor da compra"] = resumo_compras["Valor da compra"].apply(format_currency_brl)
+        st.markdown("### Compras e cotações vinculadas")
+        st.dataframe(resumo_compras, use_container_width=True, hide_index=True)
+
+        compra_id = st.selectbox(
+            "Compra para conferir",
+            compras_cotacoes["compra_id"].tolist(),
+            format_func=lambda valor: (
+                f"Compra #{int(valor)} - Solicitação #"
+                f"{int(compras_cotacoes.loc[compras_cotacoes.compra_id == valor, 'solicitacao_id'].iloc[0])} - "
+                f"{compras_cotacoes.loc[compras_cotacoes.compra_id == valor, 'rubrica_codigo'].iloc[0]}"
+            ),
+            key="cotacoes_compra_conferir",
+        )
+        compra_sel = compras_cotacoes[compras_cotacoes["compra_id"] == compra_id].iloc[0]
+        rubrica_compra_id = int(compra_sel["rubrica_id"])
+        cotacoes_compra = query("""
+        select
+          co.id,
+          co.ordem,
+          co.fornecedor,
+          co.cnpj_cpf,
+          co.telefone_email,
+          co.prazo_entrega,
+          co.arquivo_url,
+          co.observacoes,
+          co.vencedora,
+          coalesce(sum(ci.valor_total), co.valor_total, 0) as valor_total,
+          count(ci.id) as total_itens
+        from cotacoes co
+        left join solicitacoes_compra s on s.id = co.solicitacao_id
+        left join cotacao_itens ci on ci.cotacao_id = co.id
+        where coalesce(co.rubrica_id, s.rubrica_id)=%s
+        group by co.id, co.ordem, co.fornecedor, co.cnpj_cpf, co.telefone_email, co.prazo_entrega, co.arquivo_url, co.observacoes, co.vencedora, co.valor_total
+        order by co.ordem, co.id
+        """, (rubrica_compra_id,))
+
+        st.markdown("### Cotações da compra")
+        if len(cotacoes_compra) == 0:
+            st.warning("Esta compra nao tem cotacoes vinculadas a rubrica.")
+        else:
+            cotacoes_exibicao = cotacoes_compra[["ordem", "fornecedor", "total_itens", "valor_total", "prazo_entrega", "arquivo_url", "vencedora"]].copy()
+            cotacoes_exibicao = cotacoes_exibicao.rename(columns={
+                "ordem": "Cotacao",
+                "fornecedor": "Fornecedor",
+                "total_itens": "Itens",
+                "valor_total": "Valor total",
+                "prazo_entrega": "Prazo",
+                "arquivo_url": "Link",
+                "vencedora": "Vencedora",
+            })
+            cotacoes_exibicao["Valor total"] = cotacoes_exibicao["Valor total"].apply(format_currency_brl)
+            st.dataframe(
+                cotacoes_exibicao,
+                use_container_width=True,
+                hide_index=True,
+                column_config={"Link": st.column_config.LinkColumn("Abrir")},
+            )
+
+            cotacao_id_ver = st.selectbox(
+                "Cotacao para detalhar/remover",
+                cotacoes_compra["id"].tolist(),
+                format_func=lambda valor: (
+                    f"Cotacao {int(cotacoes_compra.loc[cotacoes_compra.id == valor, 'ordem'].iloc[0])} - "
+                    f"{cotacoes_compra.loc[cotacoes_compra.id == valor, 'fornecedor'].iloc[0]}"
+                ),
+                key=f"cotacoes_compra_cotacao_{compra_id}",
+            )
+            itens_cotacao = query("""
+            select
+              coalesce(ci.descricao_item, pi.descricao) as item,
+              coalesce(ci.tipo_item, pi.tipo_item) as tipo,
+              ci.quantidade,
+              ci.valor_unitario,
+              ci.valor_total,
+              ci.observacoes,
+              ci.vencedor
+            from cotacao_itens ci
+            join pedido_itens pi on pi.id = ci.pedido_item_id
+            where ci.cotacao_id=%s
+            order by pi.descricao, ci.created_at
+            """, (int(cotacao_id_ver),))
+            if len(itens_cotacao):
+                itens_exibicao = itens_cotacao.rename(columns={
+                    "item": "Item",
+                    "tipo": "Tipo",
+                    "quantidade": "Quantidade",
+                    "valor_unitario": "Valor unitario",
+                    "valor_total": "Valor total",
+                    "observacoes": "Observacoes",
+                    "vencedor": "Vencedor",
+                })
+                itens_exibicao["Valor unitario"] = itens_exibicao["Valor unitario"].apply(format_currency_brl)
+                itens_exibicao["Valor total"] = itens_exibicao["Valor total"].apply(format_currency_brl)
+                st.dataframe(itens_exibicao, use_container_width=True, hide_index=True)
+            else:
+                st.info("Esta cotacao nao possui itens.")
+
+            cotacao_sel = cotacoes_compra[cotacoes_compra["id"] == cotacao_id_ver].iloc[0]
+            cotacao_vencedora_compra = compra_sel["cotacao_vencedora_id"] is not None and int(compra_sel["cotacao_vencedora_id"]) == int(cotacao_id_ver)
+            if bool(cotacao_sel["vencedora"]) or cotacao_vencedora_compra:
+                st.warning("A cotacao vencedora nao pode ser removida aqui. Altere a compra/cotacao vencedora antes de excluir.")
+            else:
+                confirmar_remocao = st.checkbox(
+                    "Confirmo que esta cotacao nao deve ficar vinculada",
+                    key=f"confirmar_remover_cotacao_{cotacao_id_ver}",
+                )
+                if st.button("Remover cotacao selecionada", disabled=not confirmar_remocao, key=f"remover_cotacao_compra_{cotacao_id_ver}"):
+                    compras_vinculadas = query("select count(*) as total from compras where cotacao_vencedora_id=%s", (int(cotacao_id_ver),))
+                    if len(compras_vinculadas) and int(compras_vinculadas.iloc[0]["total"] or 0) > 0:
+                        st.error("Esta cotacao esta vinculada como vencedora em uma compra. Altere a compra antes de remover.")
+                        st.stop()
+                    execute("delete from cotacoes where id=%s", (int(cotacao_id_ver),))
+                    st.success("Cotacao removida.")
+                    st.rerun()
+
+        total_cotacoes_compra = int(compra_sel["total_cotacoes"] or 0)
+        cotacoes_faltantes = max(0, 3 - total_cotacoes_compra)
+        if cotacoes_faltantes:
+            st.warning(f"Faltam {cotacoes_faltantes} cotacao(oes) complementar(es) para esta compra.")
+        else:
+            st.success("Esta compra ja possui pelo menos 3 cotacoes.")
+
+        if st.button("Adicionar ou editar cotacoes desta rubrica", type="primary", key=f"ir_cotacoes_rubrica_{compra_id}"):
+            st.session_state["cotacoes_visao"] = "Cadastrar/editar cotacoes"
+            st.session_state["cotacoes_rubrica_foco"] = rubrica_compra_id
+            st.rerun()
+
+        st.stop()
+
     rubricas_cotacao = query("""
     select distinct r.id, r.codigo, r.nome
     from rubricas r
     join solicitacoes_compra s on s.rubrica_id = r.id
     join pedido_itens pi on pi.pedido_id = s.id
     where s.autorizado=true
-      and s.status in ('em_andamento','cotado','aguardando_nota')
+      and s.status in ('em_andamento','cotado','aguardando_nota','finalizado')
     order by r.codigo, r.nome
     """)
     solicitacoes = rubricas_cotacao
     if len(solicitacoes) == 0:
         st.warning("Não há itens autorizados para cotação.")
     else:
+        rubricas_ids = rubricas_cotacao["id"].tolist()
+        rubrica_foco = st.session_state.pop("cotacoes_rubrica_foco", None)
+        rubrica_index = 0
+        if rubrica_foco in rubricas_ids:
+            rubrica_index = rubricas_ids.index(rubrica_foco)
         rubrica_id = st.selectbox(
             "Rubrica",
-            rubricas_cotacao["id"].tolist(),
+            rubricas_ids,
+            index=rubrica_index,
             format_func=lambda x: f"{rubricas_cotacao.loc[rubricas_cotacao.id==x,'codigo'].iloc[0]} - {rubricas_cotacao.loc[rubricas_cotacao.id==x,'nome'].iloc[0]}",
         )
         sid = f"rubrica_{rubrica_id}"
@@ -3391,7 +3597,7 @@ elif menu == "cotacoes":
         join solicitacoes_compra s on s.id = pi.pedido_id
         where s.rubrica_id=%s
           and s.autorizado=true
-          and s.status in ('em_andamento','cotado','aguardando_nota')
+          and s.status in ('em_andamento','cotado','aguardando_nota','finalizado')
         order by s.id desc, pi.created_at, pi.descricao
         """, (rubrica_id,))
         if len(pedido_itens) == 0:
