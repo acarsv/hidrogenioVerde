@@ -5982,7 +5982,7 @@ elif menu == "itens_comprados":
                         continue
                     linha_original = editor_df.loc[indice_linha]
                     try:
-                        item_nf_id = int(linha_original["_item_nf_id"])
+                        item_nf_id = str(linha_original["_item_nf_id"])
                         nota_fiscal_id = int(linha_original["_nota_fiscal_id"])
                         compra_id = linha_original["_compra_id"]
                         rubrica_id = linha_original["_rubrica_id"]
