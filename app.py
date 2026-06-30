@@ -5767,11 +5767,15 @@ elif menu == "ia_operacional":
 elif menu == "itens_comprados":
     df = query("""
     select
+      nfi.id as "_item_nf_id",
+      nf.id as "_nota_fiscal_id",
+      nf.compra_id as "_compra_id",
       s.id as "Solicitação",
       r.codigo as "Rubrica",
       r.nome as "Nome da rubrica",
       nfi.descricao as "Produto/serviço",
       nfi.quantidade as "Quantidade",
+      nfi.valor_unitario as "Valor unitário",
       nfi.valor_total as "Valor da compra",
       nf.fornecedor as "Fornecedor da cotação",
       nf.numero_nf as "Número da NF",
@@ -5790,20 +5794,186 @@ elif menu == "itens_comprados":
     if len(df) == 0:
         st.info("Ainda não há itens comprados finalizados.")
     else:
+        colunas_exportacao = [
+            "Solicitação",
+            "Rubrica",
+            "Nome da rubrica",
+            "Produto/serviço",
+            "Quantidade",
+            "Valor unitário",
+            "Valor da compra",
+            "Fornecedor da cotação",
+            "Número da NF",
+            "Fornecedor da NF",
+            "Valor da NF",
+            "Data de emissão",
+            "Lançado em",
+        ]
         st.download_button(
             "Baixar planilha por rubrica",
-            data=construir_planilha_itens_comprados(df),
+            data=construir_planilha_itens_comprados(df[colunas_exportacao]),
             file_name=f"produtos_comprados_por_rubrica_{date.today().isoformat()}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-        st.dataframe(
-            df,
+
+        editor_df = df.copy()
+        editor_df.insert(0, "Ação", "Manter")
+        editor_df["Data de emissão"] = pd.to_datetime(editor_df["Data de emissão"], errors="coerce").dt.date
+        editor_df["Lançado em"] = pd.to_datetime(editor_df["Lançado em"], errors="coerce").dt.strftime("%d/%m/%Y %H:%M")
+        editor_df = editor_df[
+            [
+                "Ação",
+                "_item_nf_id",
+                "_nota_fiscal_id",
+                "_compra_id",
+                "Solicitação",
+                "Rubrica",
+                "Nome da rubrica",
+                "Produto/serviço",
+                "Quantidade",
+                "Valor unitário",
+                "Valor da compra",
+                "Fornecedor da cotação",
+                "Número da NF",
+                "Fornecedor da NF",
+                "Valor da NF",
+                "Data de emissão",
+                "Lançado em",
+            ]
+        ]
+        itens_editados = st.data_editor(
+            editor_df,
             use_container_width=True,
+            hide_index=True,
+            disabled=[
+                "_item_nf_id",
+                "_nota_fiscal_id",
+                "_compra_id",
+                "Solicitação",
+                "Rubrica",
+                "Nome da rubrica",
+                "Valor da compra",
+                "Fornecedor da cotação",
+                "Valor da NF",
+                "Lançado em",
+            ],
             column_config={
+                "Ação": st.column_config.SelectboxColumn(
+                    "Ação",
+                    options=["Manter", "Salvar", "Deletar"],
+                    required=True,
+                    width="small",
+                ),
+                "_item_nf_id": None,
+                "_nota_fiscal_id": None,
+                "_compra_id": None,
+                "Quantidade": st.column_config.NumberColumn("Quantidade", min_value=0.01, step=1.0, format="%.2f"),
+                "Valor unitário": st.column_config.NumberColumn("Valor unitário", min_value=0.0, step=0.01, format="R$ %.2f"),
                 "Valor da compra": st.column_config.NumberColumn("Valor da compra", format="R$ %.2f"),
                 "Valor da NF": st.column_config.NumberColumn("Valor da NF", format="R$ %.2f"),
+                "Data de emissão": st.column_config.DateColumn("Data de emissão"),
             },
+            key="itens_comprados_editor",
         )
+
+        def recalcular_totais_nota_compra(nota_fiscal_id, compra_id):
+            execute("""
+            update notas_fiscais nf
+            set valor_nf = totais.valor_total
+            from (
+              select coalesce(sum(valor_total), 0) as valor_total
+              from nota_fiscal_itens
+              where nota_fiscal_id=%s
+            ) totais
+            where nf.id=%s
+            """, (int(nota_fiscal_id), int(nota_fiscal_id)))
+            if compra_id is not None and not pd.isna(compra_id):
+                execute("""
+                update compras c
+                set valor_compra = totais.valor_total
+                from (
+                  select coalesce(sum(nfi.valor_total), 0) as valor_total
+                  from notas_fiscais nf
+                  join nota_fiscal_itens nfi on nfi.nota_fiscal_id = nf.id
+                  where nf.compra_id=%s
+                ) totais
+                where c.id=%s
+                """, (int(compra_id), int(compra_id)))
+
+        def remover_nota_vazia(nota_fiscal_id):
+            execute("""
+            delete from notas_fiscais nf
+            where nf.id=%s
+              and not exists (
+                select 1
+                from nota_fiscal_itens nfi
+                where nfi.nota_fiscal_id = nf.id
+              )
+            """, (int(nota_fiscal_id),))
+
+        if st.button("Aplicar ações selecionadas", type="primary", use_container_width=True):
+            linhas_acao = itens_editados[itens_editados["Ação"].isin(["Salvar", "Deletar"])]
+            if len(linhas_acao) == 0:
+                st.info("Marque pelo menos uma linha como Salvar ou Deletar.")
+            else:
+                total_salvas = 0
+                total_deletadas = 0
+                erros = []
+                for _, linha in linhas_acao.iterrows():
+                    item_nf_id = int(linha["_item_nf_id"])
+                    nota_fiscal_id = int(linha["_nota_fiscal_id"])
+                    compra_id = linha["_compra_id"]
+                    try:
+                        if linha["Ação"] == "Deletar":
+                            execute("delete from nota_fiscal_itens where id=%s", (item_nf_id,))
+                            recalcular_totais_nota_compra(nota_fiscal_id, compra_id)
+                            remover_nota_vazia(nota_fiscal_id)
+                            total_deletadas += 1
+                        else:
+                            descricao = str(linha["Produto/serviço"] or "").strip()
+                            numero_nf = str(linha["Número da NF"] or "").strip()
+                            fornecedor_nf = str(linha["Fornecedor da NF"] or "").strip()
+                            if not descricao or not numero_nf or not fornecedor_nf:
+                                erros.append(f"Linha item NF #{item_nf_id}: preencha produto, número da NF e fornecedor.")
+                                continue
+                            quantidade = Decimal(str(linha["Quantidade"]))
+                            valor_unitario = Decimal(str(linha["Valor unitário"]))
+                            if quantidade <= 0:
+                                erros.append(f"Linha item NF #{item_nf_id}: quantidade precisa ser maior que zero.")
+                                continue
+                            if valor_unitario < 0:
+                                erros.append(f"Linha item NF #{item_nf_id}: valor unitário não pode ser negativo.")
+                                continue
+                            data_emissao = linha["Data de emissão"]
+                            execute("""
+                            update nota_fiscal_itens
+                            set descricao=%s,
+                                quantidade=%s,
+                                valor_unitario=%s
+                            where id=%s
+                            """, (descricao, quantidade, valor_unitario, item_nf_id))
+                            if data_emissao is not None and pd.isna(data_emissao):
+                                data_emissao = None
+                            execute("""
+                            update notas_fiscais
+                            set numero_nf=%s,
+                                fornecedor=%s,
+                                data_emissao=%s
+                            where id=%s
+                            """, (numero_nf, fornecedor_nf, data_emissao, nota_fiscal_id))
+                            recalcular_totais_nota_compra(nota_fiscal_id, compra_id)
+                            total_salvas += 1
+                    except Exception as exc:
+                        erros.append(f"Linha item NF #{item_nf_id}: {exc}")
+                sincronizar_orcamento()
+                if total_salvas or total_deletadas:
+                    st.success(f"Ações aplicadas: {total_salvas} salva(s), {total_deletadas} deletada(s).")
+                for erro in erros:
+                    st.error(erro)
+                if total_salvas or total_deletadas:
+                    st.rerun()
+
+        st.caption("Use a coluna Ação para escolher Salvar ou Deletar em cada linha e depois clique em Aplicar ações selecionadas.")
 
 elif menu == "membros":
     if user["papel"] != "admin":
