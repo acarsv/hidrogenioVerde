@@ -3107,7 +3107,11 @@ elif menu == "nova_exigencia":
         "servico_pf": "servico",
     }.get(tipo_rubrica, "permanente")
     saldo_atual = Decimal(str(rubricas.loc[rubricas["label"] == rubrica_label, "saldo_disponivel"].iloc[0]))
-    st.caption(f"Disponível operacional: {format_currency_brl_markdown(saldo_atual)}")
+    st.markdown(
+        f"<span style='color:#8a8d98;font-size:0.95rem;'>Disponível operacional: "
+        f"<strong>{format_currency_brl_markdown(saldo_atual)}</strong></span>",
+        unsafe_allow_html=True,
+    )
     if "nova_exigencia_form_version" not in st.session_state:
         st.session_state.nova_exigencia_form_version = 0
     if "nova_exigencia_sucesso" in st.session_state:
