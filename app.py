@@ -3653,15 +3653,16 @@ elif menu == "cotacoes":
           c.prazo_entrega,
           c.arquivo_url,
           c.observacoes,
-          count(ci.id) as total_itens,
-          coalesce(sum(ci.valor_total), c.valor_total, 0) as valor_total
+          count(pi_ci.id) as total_itens,
+          coalesce(sum(ci.valor_total) filter (where pi_ci.id is not null), c.valor_total, 0) as valor_total
         from cotacoes c
         left join solicitacoes_compra s on s.id = c.solicitacao_id
         left join cotacao_itens ci on ci.cotacao_id = c.id
+        left join pedido_itens pi_ci on pi_ci.id = ci.pedido_item_id and pi_ci.pedido_id=%s
         where c.solicitacao_id=%s
         group by c.id, c.solicitacao_id, c.ordem, c.fornecedor, c.cnpj_cpf, c.telefone_email, c.prazo_entrega, c.arquivo_url, c.observacoes, c.valor_total
         order by c.ordem
-        """, (sid,))
+        """, (sid, sid))
 
         def cotacao_v2_itens(cotacao_id):
             return query("""
@@ -3678,8 +3679,9 @@ elif menu == "cotacoes":
             from cotacao_itens ci
             join pedido_itens pi on pi.id = ci.pedido_item_id
             where ci.cotacao_id=%s
+              and pi.pedido_id=%s
             order by ci.created_at, ci.id
-            """, (cotacao_id,))
+            """, (cotacao_id, sid))
 
         def cotacao_v2_formatar_itens(itens_df):
             tabela = itens_df.copy()
@@ -3755,7 +3757,7 @@ elif menu == "cotacoes":
             exibir_arquivos_cotacao(cotacao_atual.get("id"))
 
             st.markdown("### Adicionar item à cotação")
-            adicionar_todos = st.checkbox("Adicionar todos os itens autorizados desta rubrica", key=f"{prefixo}_adicionar_todos")
+            adicionar_todos = st.checkbox("Adicionar todos os itens autorizados desta solicitacao", key=f"{prefixo}_adicionar_todos")
             if adicionar_todos:
                 itens = list(st.session_state[f"{prefixo}_itens"])
                 itens_ja_adicionados = {str(item["pedido_item_id"]) for item in itens if item.get("pedido_item_id") is not None}
@@ -3781,7 +3783,7 @@ elif menu == "cotacoes":
                     st.success(f"{len(novos_itens)} item(ns) adicionado(s) a cotacao.")
                     st.rerun()
                 else:
-                    st.info("Todos os itens autorizados desta rubrica ja estao na cotacao.")
+                    st.info("Todos os itens autorizados desta solicitacao ja estao na cotacao.")
             tipos_item = ["permanente", "consumo", "servico"]
             origem_item = st.radio(
                 "Origem do item",
@@ -3791,7 +3793,7 @@ elif menu == "cotacoes":
             )
             if origem_item == "Item autorizado da rubrica":
                 item_id = st.selectbox(
-                    "Item da rubrica",
+                    "Item da solicitacao",
                     pedido_itens["id"].tolist(),
                     format_func=lambda valor: (
                         f"Solicitação #{int(pedido_itens.loc[pedido_itens.id == valor, 'pedido_id'].iloc[0])} - "
