@@ -3606,20 +3606,29 @@ elif menu == "cotacoes":
             st.stop()
         solicitacoes_ids = solicitacoes_rubrica["id"].tolist()
         solicitacao_foco = st.session_state.pop("cotacoes_solicitacao_foco", None)
-        solicitacao_index = 0
-        if solicitacao_foco in solicitacoes_ids:
-            solicitacao_index = solicitacoes_ids.index(solicitacao_foco)
-        sid = st.selectbox(
-            "Solicitacao",
+        if isinstance(solicitacao_foco, list):
+            solicitacoes_default = [valor for valor in solicitacao_foco if valor in solicitacoes_ids]
+        elif solicitacao_foco in solicitacoes_ids:
+            solicitacoes_default = [solicitacao_foco]
+        else:
+            solicitacoes_default = [solicitacoes_ids[0]]
+        selected_sids = st.multiselect(
+            "Solicitacoes do lote de cotacao",
             solicitacoes_ids,
-            index=solicitacao_index,
+            default=solicitacoes_default,
             format_func=lambda valor: (
                 f"#{int(valor)} - "
                 f"{solicitacoes_rubrica.loc[solicitacoes_rubrica.id == valor, 'descricao'].iloc[0][:90]} - "
                 f"{int(solicitacoes_rubrica.loc[solicitacoes_rubrica.id == valor, 'total_itens'].iloc[0])} item(ns)"
             ),
-            key=f"cotacao_solicitacao_{rubrica_id}",
+            key=f"cotacao_solicitacoes_{rubrica_id}",
         )
+        if not selected_sids:
+            st.warning("Selecione pelo menos uma solicitacao para cadastrar a cotacao.")
+            st.stop()
+        selected_sids = [int(valor) for valor in selected_sids]
+        sid = int(selected_sids[0])
+        cotacao_lote_key = "_".join(str(valor) for valor in selected_sids)
         pedido_itens = query("""
         select
           pi.id,
@@ -3632,11 +3641,11 @@ elif menu == "cotacoes":
           pi.valor_total
         from pedido_itens pi
         join solicitacoes_compra s on s.id = pi.pedido_id
-        where s.id=%s
+        where s.id = any(%s)
           and s.autorizado=true
           and s.status in ('em_andamento','cotado','aguardando_nota','finalizado')
-        order by s.id desc, pi.created_at, pi.descricao
-        """, (sid,))
+        order by s.id, pi.created_at, pi.descricao
+        """, (selected_sids,))
         if len(pedido_itens) == 0:
             st.warning("Esta rubrica ainda não tem itens autorizados para cotação. Recrie pela tela Nova exigência ou migre os itens antes de cotar.")
             st.stop()
@@ -3658,11 +3667,21 @@ elif menu == "cotacoes":
         from cotacoes c
         left join solicitacoes_compra s on s.id = c.solicitacao_id
         left join cotacao_itens ci on ci.cotacao_id = c.id
-        left join pedido_itens pi_ci on pi_ci.id = ci.pedido_item_id and pi_ci.pedido_id=%s
-        where c.solicitacao_id=%s
+        left join pedido_itens pi_ci on pi_ci.id = ci.pedido_item_id and pi_ci.pedido_id = any(%s)
+        where c.rubrica_id=%s
+          and (
+            c.solicitacao_id = any(%s)
+            or exists (
+              select 1
+              from cotacao_itens ci_existe
+              join pedido_itens pi_existe on pi_existe.id = ci_existe.pedido_item_id
+              where ci_existe.cotacao_id = c.id
+                and pi_existe.pedido_id = any(%s)
+            )
+          )
         group by c.id, c.solicitacao_id, c.ordem, c.fornecedor, c.cnpj_cpf, c.telefone_email, c.prazo_entrega, c.arquivo_url, c.observacoes, c.valor_total
         order by c.ordem
-        """, (sid, sid))
+        """, (selected_sids, rubrica_id, selected_sids, selected_sids))
 
         def cotacao_v2_itens(cotacao_id):
             return query("""
@@ -3679,9 +3698,9 @@ elif menu == "cotacoes":
             from cotacao_itens ci
             join pedido_itens pi on pi.id = ci.pedido_item_id
             where ci.cotacao_id=%s
-              and pi.pedido_id=%s
+              and pi.pedido_id = any(%s)
             order by ci.created_at, ci.id
-            """, (cotacao_id, sid))
+            """, (cotacao_id, selected_sids))
 
         def cotacao_v2_formatar_itens(itens_df):
             tabela = itens_df.copy()
@@ -4021,9 +4040,20 @@ elif menu == "cotacoes":
                         cotacao_por_ordem = query("""
                         select c.id
                         from cotacoes c
-                        where c.solicitacao_id=%s and c.ordem=%s
+                        where c.rubrica_id=%s
+                          and c.ordem=%s
+                          and (
+                            c.solicitacao_id = any(%s)
+                            or exists (
+                              select 1
+                              from cotacao_itens ci_existe
+                              join pedido_itens pi_existe on pi_existe.id = ci_existe.pedido_item_id
+                              where ci_existe.cotacao_id = c.id
+                                and pi_existe.pedido_id = any(%s)
+                            )
+                          )
                         limit 1
-                        """, (solicitacao_ancora_id, ordem))
+                        """, (rubrica_id, ordem, selected_sids, selected_sids))
                         if len(cotacao_por_ordem):
                             cotacao_salva = query("""
                             update cotacoes
