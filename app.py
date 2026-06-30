@@ -813,6 +813,39 @@ def exibir_arquivos_nota_fiscal(nota_fiscal_id):
 
 
 def ensure_financial_governance_schema():
+    execute("""
+    create table if not exists pedidos (
+      id bigserial primary key,
+      rubrica_id bigint not null references rubricas(id),
+      solicitante_id uuid references usuarios_app(id),
+      descricao text,
+      justificativa text,
+      status text not null default 'rascunho',
+      solicitacao_id bigint references solicitacoes_compra(id) on delete set null,
+      criado_em timestamptz not null default now(),
+      atualizado_em timestamptz not null default now()
+    )
+    """)
+    execute("""
+    create table if not exists pedido_rascunho_itens (
+      id uuid primary key default gen_random_uuid(),
+      pedido_id bigint not null references pedidos(id) on delete cascade,
+      rubrica_id bigint references rubricas(id),
+      descricao text not null,
+      tipo_item text not null check (tipo_item in ('permanente', 'consumo', 'servico')),
+      quantidade numeric(12,2) not null default 1,
+      valor_unitario numeric(14,2) not null default 0,
+      valor_total numeric(14,2) generated always as (quantidade * valor_unitario) stored,
+      observacoes text,
+      created_at timestamptz not null default now()
+    )
+    """)
+    if not has_column("pedidos", "solicitacao_id"):
+        execute("alter table pedidos add column solicitacao_id bigint references solicitacoes_compra(id) on delete set null")
+    execute("create index if not exists idx_pedidos_status on pedidos(status)")
+    execute("create index if not exists idx_pedidos_rubrica_id on pedidos(rubrica_id)")
+    execute("create index if not exists idx_pedido_rascunho_itens_pedido_id on pedido_rascunho_itens(pedido_id)")
+
     if not has_column("cotacoes", "arquivo_url"):
         execute("alter table cotacoes add column arquivo_url text")
     if not has_column("cotacoes", "observacoes"):
@@ -3068,6 +3101,183 @@ elif menu == "nova_exigencia":
         st.session_state.nova_exigencia_form_version = 0
     if "nova_exigencia_sucesso" in st.session_state:
         st.success(st.session_state.pop("nova_exigencia_sucesso"))
+
+    pedidos_abertos = query("""
+    select
+      p.id,
+      p.descricao,
+      p.justificativa,
+      p.criado_em,
+      count(i.id) as total_itens,
+      coalesce(sum(i.valor_total), 0) as valor_total
+    from pedidos p
+    left join pedido_rascunho_itens i on i.pedido_id = p.id
+    where p.rubrica_id=%s
+      and p.status='rascunho'
+      and (p.solicitante_id=%s or %s in ('admin','gerente'))
+    group by p.id, p.descricao, p.justificativa, p.criado_em
+    order by p.id desc
+    """, (rubrica_id, user["id"], user["papel"]))
+
+    col_novo, col_atualizar = st.columns(2)
+    if col_novo.button("Criar novo pedido", type="primary", use_container_width=True):
+        pedido_criado = query("""
+        insert into pedidos (rubrica_id, solicitante_id, status)
+        values (%s,%s,'rascunho')
+        returning id
+        """, (rubrica_id, user["id"]))
+        st.session_state["nova_exigencia_pedido_id"] = int(pedido_criado.iloc[0]["id"])
+        st.rerun()
+    if col_atualizar.button("Atualizar pedidos", use_container_width=True):
+        st.rerun()
+
+    if len(pedidos_abertos) == 0:
+        st.session_state.pop("nova_exigencia_pedido_id", None)
+        st.info("Crie um pedido para adicionar itens. Ele so sera enviado para solicitacao quando voce finalizar.")
+        st.stop()
+
+    pedidos_ids = pedidos_abertos["id"].tolist() if len(pedidos_abertos) else []
+    pedido_sessao = st.session_state.get("nova_exigencia_pedido_id")
+    pedido_index = 0
+    if pedido_sessao in pedidos_ids:
+        pedido_index = pedidos_ids.index(pedido_sessao)
+    pedido_id = st.selectbox(
+        "Pedido em elaboracao",
+        pedidos_ids,
+        index=pedido_index,
+        format_func=lambda valor: (
+            f"Pedido #{int(valor)} - "
+            f"{int(pedidos_abertos.loc[pedidos_abertos.id == valor, 'total_itens'].iloc[0])} item(ns) - "
+            f"{format_currency_brl(pedidos_abertos.loc[pedidos_abertos.id == valor, 'valor_total'].iloc[0])}"
+        ),
+        key=f"nova_exigencia_pedido_select_{rubrica_id}",
+    )
+    st.session_state["nova_exigencia_pedido_id"] = int(pedido_id)
+    pedido_atual = pedidos_abertos[pedidos_abertos["id"] == pedido_id].iloc[0]
+
+    st.markdown(f"### Pedido #{int(pedido_id)}")
+    descricao = st.text_area("Resumo do pedido/requerimento", value=str(pedido_atual["descricao"] or ""), key=f"pedido_descricao_{pedido_id}")
+    justificativa = st.text_area("Justificativa", value=str(pedido_atual["justificativa"] or ""), key=f"pedido_justificativa_{pedido_id}")
+    itens_rascunho = query("""
+    select descricao, tipo_item, quantidade, valor_unitario, observacoes
+    from pedido_rascunho_itens
+    where pedido_id=%s
+    order by created_at, descricao
+    """, (int(pedido_id),))
+    if len(itens_rascunho) == 0:
+        itens_rascunho = pd.DataFrame([{
+            "descricao": "",
+            "tipo_item": tipo_item_padrao,
+            "quantidade": 1.0,
+            "valor_unitario": 0.0,
+            "observacoes": "",
+        }])
+
+    st.markdown("### Itens do pedido")
+    itens_editados = st.data_editor(
+        itens_rascunho,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic",
+        column_config={
+            "descricao": st.column_config.TextColumn("Item", required=True),
+            "tipo_item": st.column_config.SelectboxColumn("Tipo", options=["permanente", "consumo", "servico"], required=True),
+            "quantidade": st.column_config.NumberColumn("Quantidade", min_value=0.01, format="%.2f"),
+            "valor_unitario": st.column_config.NumberColumn("Valor unitario", min_value=0.0, format="R$ %.2f"),
+            "observacoes": st.column_config.TextColumn("Observacoes"),
+        },
+        key=f"pedido_itens_editor_{pedido_id}",
+    )
+    itens_validos = itens_editados[itens_editados["descricao"].fillna("").astype(str).str.strip() != ""].copy()
+    if len(itens_validos):
+        itens_validos["quantidade"] = pd.to_numeric(itens_validos["quantidade"], errors="coerce").fillna(0)
+        itens_validos["valor_unitario"] = pd.to_numeric(itens_validos["valor_unitario"], errors="coerce").fillna(0)
+        itens_validos["valor_total"] = itens_validos["quantidade"] * itens_validos["valor_unitario"]
+    valor_estimado = float(itens_validos["valor_total"].sum()) if len(itens_validos) else 0.0
+    st.metric("Valor total estimado", format_currency_brl(valor_estimado))
+
+    def salvar_pedido_rascunho():
+        execute("""
+        update pedidos
+        set descricao=%s, justificativa=%s, atualizado_em=now()
+        where id=%s and status='rascunho'
+        """, (descricao.strip() or None, justificativa.strip() or None, int(pedido_id)))
+        execute("delete from pedido_rascunho_itens where pedido_id=%s", (int(pedido_id),))
+        for _, item in itens_validos.iterrows():
+            execute("""
+            insert into pedido_rascunho_itens (pedido_id, rubrica_id, descricao, tipo_item, quantidade, valor_unitario, observacoes)
+            values (%s,%s,%s,%s,%s,%s,%s)
+            """, (
+                int(pedido_id),
+                rubrica_id,
+                str(item["descricao"]).strip(),
+                item["tipo_item"],
+                Decimal(str(item["quantidade"])),
+                Decimal(str(item["valor_unitario"])),
+                str(item.get("observacoes") or "").strip() or None,
+            ))
+
+    col_salvar, col_finalizar, col_descartar = st.columns(3)
+    if col_salvar.button("Salvar pedido", use_container_width=True):
+        if len(itens_validos) and (itens_validos["quantidade"] <= 0).any():
+            st.error("Todos os itens devem ter quantidade maior que zero.")
+        else:
+            salvar_pedido_rascunho()
+            st.success(f"Pedido #{int(pedido_id)} salvo.")
+            st.rerun()
+
+    if col_descartar.button("Descartar pedido", use_container_width=True):
+        execute("delete from pedidos where id=%s and status='rascunho'", (int(pedido_id),))
+        st.session_state.pop("nova_exigencia_pedido_id", None)
+        st.success("Pedido descartado.")
+        st.rerun()
+
+    if col_finalizar.button("Finalizar e enviar para solicitacao", type="primary", use_container_width=True):
+        valor_estimado_decimal = Decimal(str(valor_estimado))
+        excede_saldo, saldo_disponivel = excede_saldo_disponivel(rubrica_id, valor_estimado_decimal)
+        if len(itens_validos) == 0:
+            st.error("Informe pelo menos um item do pedido.")
+        elif (itens_validos["quantidade"] <= 0).any():
+            st.error("Todos os itens devem ter quantidade maior que zero.")
+        elif excede_saldo:
+            st.error(
+                "Pedido nao enviado. "
+                f"O valor total ({format_currency_brl_markdown(valor_estimado_decimal)}) "
+                f"supera o disponivel operacional da rubrica ({format_currency_brl_markdown(saldo_disponivel)})."
+            )
+        else:
+            salvar_pedido_rascunho()
+            descricao_pedido = descricao.strip() or "; ".join(itens_validos["descricao"].astype(str).tolist())[:500]
+            solicitacao_criada = query("""
+            insert into solicitacoes_compra (rubrica_id, solicitante_id, descricao, quantidade, unidade, valor_estimado, justificativa, status)
+            values (%s,%s,%s,%s,%s,%s,%s,'solicitacao')
+            returning id
+            """, (rubrica_id, user["id"], descricao_pedido, float(itens_validos["quantidade"].sum()), "itens", valor_estimado, justificativa))
+            solicitacao_id = int(solicitacao_criada.iloc[0]["id"])
+            for _, item in itens_validos.iterrows():
+                execute("""
+                insert into pedido_itens (pedido_id, rubrica_id, descricao, tipo_item, quantidade, valor_unitario, observacoes)
+                values (%s,%s,%s,%s,%s,%s,%s)
+                """, (
+                    solicitacao_id,
+                    rubrica_id,
+                    str(item["descricao"]).strip(),
+                    item["tipo_item"],
+                    Decimal(str(item["quantidade"])),
+                    Decimal(str(item["valor_unitario"])),
+                    str(item.get("observacoes") or "").strip() or None,
+                ))
+            execute("""
+            update pedidos
+            set status='enviado', solicitacao_id=%s, atualizado_em=now()
+            where id=%s
+            """, (solicitacao_id, int(pedido_id)))
+            sincronizar_orcamento()
+            st.session_state.nova_exigencia_sucesso = f"Pedido #{int(pedido_id)} finalizado e enviado como solicitacao #{solicitacao_id}."
+            st.session_state.pop("nova_exigencia_pedido_id", None)
+            st.rerun()
+
+    st.stop()
 
     form_version = st.session_state.nova_exigencia_form_version
     descricao = st.text_area("Resumo do pedido/requerimento", key=f"nova_descricao_{form_version}")
