@@ -5770,6 +5770,8 @@ elif menu == "itens_comprados":
       nfi.id as "_item_nf_id",
       nf.id as "_nota_fiscal_id",
       nf.compra_id as "_compra_id",
+      r.id as "_rubrica_id",
+      p.id as "pedido_id",
       s.id as "Solicitação",
       r.codigo as "Rubrica",
       r.nome as "Nome da rubrica",
@@ -5788,6 +5790,7 @@ elif menu == "itens_comprados":
     join pedido_itens pi on pi.id = nfi.pedido_item_id
     join solicitacoes_compra s on s.id = pi.pedido_id
     join rubricas r on r.id = pi.rubrica_id
+    left join pedidos p on p.solicitacao_id = s.id
     where s.status = 'finalizado'
     order by nf.lancado_em desc nulls last, nf.numero_nf, nfi.descricao
     """)
@@ -5795,6 +5798,7 @@ elif menu == "itens_comprados":
         st.info("Ainda não há itens comprados finalizados.")
     else:
         colunas_exportacao = [
+            "pedido_id",
             "Solicitação",
             "Rubrica",
             "Nome da rubrica",
@@ -5826,6 +5830,8 @@ elif menu == "itens_comprados":
                 "_item_nf_id",
                 "_nota_fiscal_id",
                 "_compra_id",
+                "_rubrica_id",
+                "pedido_id",
                 "Solicitação",
                 "Rubrica",
                 "Nome da rubrica",
@@ -5849,6 +5855,7 @@ elif menu == "itens_comprados":
                 "_item_nf_id",
                 "_nota_fiscal_id",
                 "_compra_id",
+                "_rubrica_id",
                 "Solicitação",
                 "Rubrica",
                 "Nome da rubrica",
@@ -5867,6 +5874,8 @@ elif menu == "itens_comprados":
                 "_item_nf_id": None,
                 "_nota_fiscal_id": None,
                 "_compra_id": None,
+                "_rubrica_id": None,
+                "pedido_id": st.column_config.NumberColumn("pedido_id", min_value=1, step=1, format="%d"),
                 "Quantidade": st.column_config.NumberColumn("Quantidade", min_value=0.01, step=1.0, format="%.2f"),
                 "Valor unitário": st.column_config.NumberColumn("Valor unitário", min_value=0.0, step=0.01, format="R$ %.2f"),
                 "Valor da compra": st.column_config.NumberColumn("Valor da compra", format="R$ %.2f"),
@@ -5911,6 +5920,54 @@ elif menu == "itens_comprados":
               )
             """, (int(nota_fiscal_id),))
 
+        def salvar_pedido_id_manual(pedido_id, solicitacao_id, rubrica_id):
+            if pedido_id is None or pd.isna(pedido_id):
+                return
+            pedido_id = int(pedido_id)
+            solicitacao_id = int(solicitacao_id)
+            rubrica_id = int(rubrica_id)
+            if pedido_id <= 0:
+                raise ValueError("pedido_id precisa ser maior que zero.")
+
+            conflito = query("""
+            select id, solicitacao_id
+            from pedidos
+            where id=%s and solicitacao_id is distinct from %s
+            """, (pedido_id, solicitacao_id))
+            if len(conflito):
+                raise ValueError(f"pedido_id {pedido_id} ja esta vinculado a outra solicitacao.")
+
+            existente = query("""
+            select id
+            from pedidos
+            where solicitacao_id=%s
+            limit 1
+            """, (solicitacao_id,))
+            if len(existente):
+                pedido_atual_id = int(existente.iloc[0]["id"])
+                if pedido_atual_id != pedido_id:
+                    execute("""
+                    update pedidos
+                    set id=%s,
+                        rubrica_id=%s,
+                        status=case when status='rascunho' then 'enviado' else status end,
+                        atualizado_em=now()
+                    where id=%s
+                    """, (pedido_id, rubrica_id, pedido_atual_id))
+            else:
+                execute("""
+                insert into pedidos (id, rubrica_id, status, solicitacao_id, criado_em, atualizado_em)
+                values (%s,%s,'enviado',%s,now(),now())
+                """, (pedido_id, rubrica_id, solicitacao_id))
+
+            execute("""
+            select setval(
+              pg_get_serial_sequence('pedidos', 'id'),
+              greatest((select coalesce(max(id), 1) from pedidos), 1),
+              true
+            )
+            """)
+
         if st.button("Aplicar ações selecionadas", type="primary", use_container_width=True):
             linhas_acao = itens_editados[itens_editados["Ação"].isin(["Salvar", "Deletar"])]
             if len(linhas_acao) == 0:
@@ -5923,6 +5980,7 @@ elif menu == "itens_comprados":
                     item_nf_id = int(linha["_item_nf_id"])
                     nota_fiscal_id = int(linha["_nota_fiscal_id"])
                     compra_id = linha["_compra_id"]
+                    rubrica_id = linha["_rubrica_id"]
                     try:
                         if linha["Ação"] == "Deletar":
                             execute("delete from nota_fiscal_itens where id=%s", (item_nf_id,))
@@ -5945,6 +6003,7 @@ elif menu == "itens_comprados":
                                 erros.append(f"Linha item NF #{item_nf_id}: valor unitário não pode ser negativo.")
                                 continue
                             data_emissao = linha["Data de emissão"]
+                            salvar_pedido_id_manual(linha["pedido_id"], linha["Solicitação"], rubrica_id)
                             execute("""
                             update nota_fiscal_itens
                             set descricao=%s,
