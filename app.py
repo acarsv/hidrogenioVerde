@@ -3194,6 +3194,28 @@ if menu == "orcamento":
             st.success("Parâmetros atualizados.")
             st.rerun()
 
+    remanejamentos_orcamento = query("""
+    select
+      criado_em as "Data",
+      origem_codigo || ' - ' || origem_nome as "Origem",
+      destino_codigo || ' - ' || destino_nome as "Destino",
+      valor as "Valor",
+      justificativa as "Justificativa"
+    from vw_historico_remanejamentos
+    order by criado_em desc
+    """)
+    st.markdown("### Histórico de remanejamentos")
+    if len(remanejamentos_orcamento) == 0:
+        st.info("Ainda não há remanejamentos registrados.")
+    else:
+        remanejamentos_orcamento["Data"] = (
+            pd.to_datetime(remanejamentos_orcamento["Data"], errors="coerce")
+            .dt.strftime("%d/%m/%Y %H:%M")
+            .fillna("")
+        )
+        remanejamentos_orcamento["Valor"] = remanejamentos_orcamento["Valor"].apply(format_currency_brl)
+        st.dataframe(remanejamentos_orcamento, use_container_width=True, hide_index=True)
+
 elif menu == "nova_exigencia":
     sincronizar_orcamento()
     rubricas = query("""
