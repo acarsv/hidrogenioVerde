@@ -3204,10 +3204,8 @@ if menu == "orcamento":
     from vw_historico_remanejamentos
     order by criado_em desc
     """)
-    st.markdown("### Histórico de remanejamentos")
-    if len(remanejamentos_orcamento) == 0:
-        st.info("Ainda não há remanejamentos registrados.")
-    else:
+    if len(remanejamentos_orcamento) > 0:
+        st.markdown("### Histórico de remanejamentos")
         remanejamentos_orcamento["Data"] = (
             pd.to_datetime(remanejamentos_orcamento["Data"], errors="coerce")
             .dt.strftime("%d/%m/%Y %H:%M")
