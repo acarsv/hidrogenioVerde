@@ -82,6 +82,22 @@ def execute(sql, params=None):
     finally:
         conn.close()
 
+def gerar_numero_patrimonio_labdes(data_referencia=None):
+    data_referencia = data_referencia or date.today()
+    prefixo = f"LABDES_{data_referencia.strftime('%Y%m%d')}_"
+    existentes = query("""
+    select numero_patrimonio
+    from patrimonio
+    where numero_patrimonio like %s
+    """, (f"{prefixo}%",))
+    maior_numero = 0
+    padrao = re.compile(rf"^{re.escape(prefixo)}(\d{{3,}})$")
+    for valor in existentes["numero_patrimonio"].dropna().tolist() if len(existentes) else []:
+        match = padrao.match(str(valor).strip())
+        if match:
+            maior_numero = max(maior_numero, int(match.group(1)))
+    return f"{prefixo}{maior_numero + 1:03d}"
+
 def acquire_startup_schema_lock():
     conn = get_conn()
     try:
@@ -5374,12 +5390,27 @@ elif menu == "destino_final":
             )
 
             if item["tipo_item"] == "permanente":
-                numero_patrimonio = st.text_input("Número de patrimônio", key=f"pat_numero_{item_id}")
+                if not st.session_state.get(f"pat_numero_{item_id}"):
+                    st.session_state[f"pat_numero_{item_id}"] = gerar_numero_patrimonio_labdes()
+                numero_patrimonio = st.text_input(
+                    "Número de patrimônio",
+                    key=f"pat_numero_{item_id}",
+                )
                 localizacao = st.text_input("Localização", key=f"pat_local_{item_id}")
                 responsavel = st.text_input("Responsável", key=f"pat_resp_{item_id}")
                 estado = st.selectbox("Estado", ["ativo", "manutencao", "baixado"], key=f"pat_estado_{item_id}")
                 observacoes = st.text_area("Observações", key=f"pat_obs_{item_id}")
                 if st.button("Registrar patrimônio", type="primary"):
+                    if not str(numero_patrimonio or "").strip():
+                        numero_patrimonio = gerar_numero_patrimonio_labdes()
+                    numero_patrimonio = str(numero_patrimonio).strip()
+                    patrimonio_existente = query(
+                        "select id from patrimonio where numero_patrimonio=%s limit 1",
+                        (numero_patrimonio,),
+                    )
+                    if len(patrimonio_existente):
+                        st.error("Este número de patrimônio já existe. Gere ou informe outro número.")
+                        st.stop()
                     execute("""
                     insert into patrimonio
                       (nota_fiscal_item_id, numero_patrimonio, localizacao, responsavel, estado, observacoes)
