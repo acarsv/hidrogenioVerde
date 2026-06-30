@@ -5482,6 +5482,153 @@ elif menu == "auditoria":
             c2.metric("Itens OK", ok)
             c3.metric("Pendências", pendencias)
 
+            pendencias_itens = auditoria[auditoria["status_auditoria"] != "OK"].copy()
+            if len(pendencias_itens):
+                def decimal_auditoria(valor):
+                    if valor is None or pd.isna(valor):
+                        return Decimal("0")
+                    return Decimal(str(valor))
+
+                def booleano_auditoria(valor):
+                    if valor is None or pd.isna(valor):
+                        return False
+                    return bool(valor)
+
+                def status_cotacao_linha(row):
+                    total_cotacoes = int(row.get("total_cotacoes") or 0)
+                    total_vencedoras = int(row.get("total_vencedoras") or 0)
+                    if total_cotacoes == 0:
+                        return "Sem cotação"
+                    if total_cotacoes < 3:
+                        return f"Faltam {3 - total_cotacoes} cotação(ões)"
+                    if total_vencedoras == 0:
+                        return "Sem vencedora"
+                    if total_vencedoras > 1:
+                        return "Mais de uma vencedora"
+                    if decimal_auditoria(row.get("valor_cotado_vencedor")) - decimal_auditoria(row.get("valor_solicitado")) > Decimal("0.01"):
+                        return "Valor acima do solicitado"
+                    return "OK"
+
+                def status_nf_linha(row):
+                    if int(row.get("total_itens_nf") or 0) == 0:
+                        return "Sem nota fiscal"
+                    if not booleano_auditoria(row.get("tem_arquivo_nf")):
+                        return "NF sem arquivo"
+                    valor_nf = decimal_auditoria(row.get("valor_nf_item"))
+                    valor_cotado = decimal_auditoria(row.get("valor_cotado_vencedor"))
+                    if valor_nf - valor_cotado > Decimal("0.01"):
+                        return "Valor NF acima da cotação"
+                    fornecedor_nf = row.get("fornecedores_nf")
+                    fornecedor_vencedor = row.get("fornecedor_vencedor")
+                    if (
+                        fornecedor_nf is not None and not pd.isna(fornecedor_nf)
+                        and fornecedor_vencedor is not None and not pd.isna(fornecedor_vencedor)
+                        and str(fornecedor_nf).strip() != str(fornecedor_vencedor).strip()
+                    ):
+                        return "Fornecedor diverge"
+                    return "OK"
+
+                def status_comprovante_linha(row):
+                    if int(row.get("total_itens_nf") or 0) == 0:
+                        return "Aguardando NF"
+                    if not booleano_auditoria(row.get("tem_comprovante_bancario")):
+                        return "Sem comprovante"
+                    return "OK"
+
+                def status_destino_linha(row):
+                    if int(row.get("total_itens_nf") or 0) == 0:
+                        return "Aguardando NF"
+                    tipo_item = row.get("tipo_item")
+                    if tipo_item == "permanente" and pd.isna(row.get("patrimonio_id")):
+                        return "Sem patrimônio"
+                    if tipo_item == "consumo" and pd.isna(row.get("estoque_id")):
+                        return "Sem estoque"
+                    if tipo_item == "servico" and pd.isna(row.get("atesto_id")):
+                        return "Sem atesto"
+                    return "OK"
+
+                def ponto_critico_linha(row):
+                    status = str(row.get("status_auditoria") or "")
+                    if "valor cotado maior" in status.lower():
+                        return "Preço acima do solicitado"
+                    if "valor da NF maior" in status.lower():
+                        return "NF acima da cotação"
+                    if "fornecedor da NF diverge" in status.lower():
+                        return "Fornecedor da NF diverge"
+                    if "mais de um vencedor" in status.lower():
+                        return "Cotação com múltiplas vencedoras"
+                    if "sem cotacao" in status.lower() or "cotacoes complementares" in status.lower():
+                        return "Processo de cotação incompleto"
+                    if "sem nota fiscal" in status.lower():
+                        return "Compra sem NF lançada"
+                    if "sem comprovante" in status.lower():
+                        return "Pagamento sem comprovante"
+                    if "sem patrimonio" in status.lower() or "sem estoque" in status.lower() or "sem atesto" in status.lower():
+                        return "Destino final pendente"
+                    return normalizar_texto_portugues(status)
+
+                def acao_recomendada_linha(row):
+                    cotacao = row["Pendência cotação"]
+                    nf = row["Pendência NF"]
+                    comprovante = row["Pendência comprovante"]
+                    destino = row["Pendência destino"]
+                    if cotacao != "OK":
+                        return "Revisar cotação e vencedora"
+                    if nf != "OK":
+                        return "Lançar ou corrigir nota fiscal"
+                    if comprovante != "OK":
+                        return "Anexar comprovante bancário"
+                    if destino != "OK":
+                        return "Registrar destino final"
+                    return "Revisar inconsistência apontada"
+
+                pendencias_itens["Pendência cotação"] = pendencias_itens.apply(status_cotacao_linha, axis=1)
+                pendencias_itens["Pendência NF"] = pendencias_itens.apply(status_nf_linha, axis=1)
+                pendencias_itens["Pendência comprovante"] = pendencias_itens.apply(status_comprovante_linha, axis=1)
+                pendencias_itens["Pendência destino"] = pendencias_itens.apply(status_destino_linha, axis=1)
+                pendencias_itens["Ponto crítico"] = pendencias_itens.apply(ponto_critico_linha, axis=1)
+                pendencias_itens["Ação recomendada"] = pendencias_itens.apply(acao_recomendada_linha, axis=1)
+
+                tabela_pendencias = pendencias_itens[[
+                    "rubrica_codigo",
+                    "solicitacao_id",
+                    "descricao",
+                    "tipo_item",
+                    "valor_solicitado",
+                    "valor_cotado_vencedor",
+                    "valor_nf_item",
+                    "fornecedor_vencedor",
+                    "fornecedores_nf",
+                    "Pendência cotação",
+                    "Pendência NF",
+                    "Pendência comprovante",
+                    "Pendência destino",
+                    "Ponto crítico",
+                    "Ação recomendada",
+                    "status_solicitacao",
+                ]].copy()
+                tabela_pendencias = tabela_pendencias.rename(columns={
+                    "rubrica_codigo": "Rubrica",
+                    "solicitacao_id": "Solicitação",
+                    "descricao": "Item",
+                    "tipo_item": "Tipo",
+                    "valor_solicitado": "Valor solicitado",
+                    "valor_cotado_vencedor": "Valor cotado",
+                    "valor_nf_item": "Valor NF",
+                    "fornecedor_vencedor": "Fornecedor vencedor",
+                    "fornecedores_nf": "Fornecedor NF",
+                    "status_solicitacao": "Status solicitação",
+                })
+                for coluna in ["Valor solicitado", "Valor cotado", "Valor NF"]:
+                    tabela_pendencias[coluna] = tabela_pendencias[coluna].apply(format_currency_brl)
+                tabela_pendencias["Tipo"] = tabela_pendencias["Tipo"].apply(normalizar_texto_portugues)
+                tabela_pendencias["Status solicitação"] = tabela_pendencias["Status solicitação"].apply(normalizar_texto_portugues)
+
+                st.markdown("### Pendências por item")
+                st.dataframe(tabela_pendencias, use_container_width=True, hide_index=True)
+            else:
+                st.success("Nenhum item com pendência encontrado.")
+
             with st.expander("1. Rubrica", expanded=True):
                 rubrica_resumo = (
                     auditoria
