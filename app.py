@@ -1172,13 +1172,18 @@ def ensure_permissions_schema():
 
     execute("""
     update usuarios_app
-    set permissoes = array['orcamento','nova_exigencia','solicitacoes','cotacoes','compra_nota','comprovantes_bancarios','destino_final','auditoria','ia_operacional','itens_comprados','membros']
+    set permissoes = array['orcamento','nova_exigencia','solicitacoes','cotacoes','compra_nota','comprovantes_bancarios','pedidos_finalizados','destino_final','auditoria','ia_operacional','itens_comprados','membros']
     where papel = 'admin' and (permissoes is null or cardinality(permissoes) = 0)
     """)
     execute("""
     update usuarios_app
     set permissoes = array_append(permissoes, 'comprovantes_bancarios')
     where papel = 'admin' and not ('comprovantes_bancarios' = any(permissoes))
+    """)
+    execute("""
+    update usuarios_app
+    set permissoes = array_append(permissoes, 'pedidos_finalizados')
+    where papel = 'admin' and not ('pedidos_finalizados' = any(permissoes))
     """)
 
 def hash_password(password: str) -> str:
@@ -2167,6 +2172,7 @@ def cancelar_solicitacao(solicitacao_id, usuario_id):
 
     execute("update cotacoes set vencedora=false where solicitacao_id=%s", (solicitacao_id,))
     execute("update solicitacoes_compra set status='cancelado', autorizado=false, atualizado_em=now() where id=%s", (solicitacao_id,))
+    execute("update pedidos set status='cancelado', atualizado_em=now() where solicitacao_id=%s", (solicitacao_id,))
     execute("insert into historico_status (solicitacao_id,status_novo,usuario_id,observacao) values (%s,'cancelado',%s,'Solicitação cancelada')", (solicitacao_id, usuario_id))
 
     sincronizar_orcamento()
@@ -2725,6 +2731,7 @@ BASE_MENU_OPTIONS = [
     ("cotacoes", "Cotações"),
     ("compra_nota", "Compra e nota fiscal"),
     ("comprovantes_bancarios", "Comprovantes bancários"),
+    ("pedidos_finalizados", "Pedidos finalizados"),
     ("destino_final", "Destino final"),
     ("auditoria", "Auditoria"),
     ("ia_operacional", "IA Operacional e Auditoria de Gargalos"),
@@ -5168,6 +5175,122 @@ elif menu == "comprovantes_bancarios":
                     ))
                 st.success("Comprovante bancario atualizado.")
                 st.rerun()
+
+elif menu == "pedidos_finalizados":
+    st.markdown("### Pedidos finalizados")
+    pedidos_finalizados = query("""
+    with nota_resumo as (
+      select
+        compra_id,
+        count(id) as total_notas,
+        string_agg(distinct fornecedor, ', ') as fornecedores_nf,
+        coalesce(sum(valor_nf), 0) as valor_total_nf
+      from notas_fiscais
+      group by compra_id
+    ),
+    comprovante_resumo as (
+      select
+        compra_id,
+        count(id) as total_comprovantes
+      from comprovantes_bancarios
+      group by compra_id
+    ),
+    item_resumo as (
+      select
+        pedido_id,
+        count(id) as total_itens,
+        coalesce(sum(valor_total), 0) as valor_estimado_itens
+      from pedido_itens
+      group by pedido_id
+    )
+    select
+      coalesce(p.id, s.id) as pedido_id,
+      p.id as pedido_real_id,
+      s.id as solicitacao_id,
+      r.codigo as rubrica,
+      r.nome as rubrica_nome,
+      coalesce(nullif(p.descricao, ''), nullif(s.descricao, ''), '-') as pedido,
+      s.status,
+      coalesce(co.fornecedor, nr.fornecedores_nf, '-') as empresa,
+      coalesce(c.valor_compra, nr.valor_total_nf, co.valor_total, ir.valor_estimado_itens, s.valor_estimado, 0) as valor,
+      coalesce(ir.total_itens, 0) as total_itens,
+      c.id as compra_id,
+      coalesce(nr.total_notas, 0) as total_notas,
+      coalesce(cr.total_comprovantes, 0) as total_comprovantes,
+      coalesce(p.criado_em, s.criado_em) as criado_em
+    from solicitacoes_compra s
+    join rubricas r on r.id = s.rubrica_id
+    left join pedidos p on p.solicitacao_id = s.id
+    left join item_resumo ir on ir.pedido_id = s.id
+    left join compras c on c.solicitacao_id = s.id
+    left join cotacoes co on co.id = c.cotacao_vencedora_id
+    left join nota_resumo nr on nr.compra_id = c.id
+    left join comprovante_resumo cr on cr.compra_id = c.id
+    where s.status <> 'cancelado'
+      and coalesce(p.status, 'enviado') <> 'cancelado'
+      and s.status in ('em_andamento', 'cotado', 'aguardando_nota', 'finalizado')
+    order by coalesce(p.criado_em, s.criado_em) desc, s.id desc
+    """)
+
+    if len(pedidos_finalizados) == 0:
+        st.info("Nenhum pedido finalizado encontrado.")
+        st.stop()
+
+    pedidos_finalizados["row_key"] = pedidos_finalizados.apply(
+        lambda row: f"{int(row['pedido_id'])}:{int(row['solicitacao_id'])}",
+        axis=1,
+    )
+    exibicao = pedidos_finalizados.copy()
+    exibicao["Pedido"] = exibicao["pedido_id"].apply(lambda valor: f"#{int(valor)}")
+    exibicao["Solicitação"] = exibicao["solicitacao_id"].apply(lambda valor: f"#{int(valor)}")
+    exibicao["Rubrica"] = exibicao.apply(lambda row: f"{row['rubrica']} - {row['rubrica_nome']}", axis=1)
+    exibicao["Empresa"] = exibicao["empresa"].fillna("-")
+    exibicao["Valor"] = exibicao["valor"].apply(format_currency_brl)
+    exibicao["Status"] = exibicao["status"].apply(normalizar_texto_portugues)
+    exibicao["Itens"] = exibicao["total_itens"].fillna(0).astype(int)
+    exibicao["Notas fiscais"] = exibicao["total_notas"].fillna(0).astype(int)
+    exibicao["Comprovantes"] = exibicao["total_comprovantes"].fillna(0).astype(int)
+    exibicao["Criado em"] = pd.to_datetime(exibicao["criado_em"]).dt.strftime("%d/%m/%Y %H:%M")
+    exibicao = exibicao[[
+        "Pedido",
+        "Solicitação",
+        "Rubrica",
+        "pedido",
+        "Empresa",
+        "Valor",
+        "Status",
+        "Itens",
+        "Notas fiscais",
+        "Comprovantes",
+        "Criado em",
+    ]].rename(columns={"pedido": "Resumo"})
+    st.dataframe(exibicao, use_container_width=True, hide_index=True)
+
+    st.markdown("### Cancelar pedido")
+    pedido_cancelar_key = st.selectbox(
+        "Pedido",
+        pedidos_finalizados["row_key"].tolist(),
+        format_func=lambda valor: (
+            f"Pedido #{int(pedidos_finalizados.loc[pedidos_finalizados.row_key == valor, 'pedido_id'].iloc[0])} - "
+            f"Solicitação #{int(pedidos_finalizados.loc[pedidos_finalizados.row_key == valor, 'solicitacao_id'].iloc[0])} - "
+            f"{pedidos_finalizados.loc[pedidos_finalizados.row_key == valor, 'rubrica'].iloc[0]} - "
+            f"{pedidos_finalizados.loc[pedidos_finalizados.row_key == valor, 'empresa'].iloc[0]} - "
+            f"{format_currency_brl(pedidos_finalizados.loc[pedidos_finalizados.row_key == valor, 'valor'].iloc[0])}"
+        ),
+        key="pedido_finalizado_cancelar_id",
+    )
+    pedido_cancelar = pedidos_finalizados[pedidos_finalizados["row_key"] == pedido_cancelar_key].iloc[0]
+    pedido_cancelar_id = int(pedido_cancelar["pedido_id"])
+    if int(pedido_cancelar["total_notas"] or 0) > 0 or int(pedido_cancelar["total_comprovantes"] or 0) > 0:
+        st.warning("Este pedido ja tem nota fiscal ou comprovante vinculado. O cancelamento remove a compra e as notas fiscais vinculadas.")
+    confirmar_cancelamento = st.checkbox(
+        f"Confirmo o cancelamento do pedido #{int(pedido_cancelar_id)}",
+        key=f"confirmar_cancelamento_pedido_{pedido_cancelar_id}",
+    )
+    if st.button("Cancelar pedido selecionado", type="primary", use_container_width=True, disabled=not confirmar_cancelamento):
+        cancelar_solicitacao(int(pedido_cancelar["solicitacao_id"]), user["id"])
+        st.success(f"Pedido #{int(pedido_cancelar_id)} cancelado.")
+        st.rerun()
 
 elif menu == "destino_final":
     itens_destino = query("""
