@@ -3556,107 +3556,56 @@ elif menu == "cotacoes":
 
         if st.button("Adicionar ou editar cotacoes desta solicitacao", type="primary", key=f"ir_cotacoes_rubrica_{compra_id}"):
             st.session_state["cotacoes_visao"] = "Cadastrar/editar cotacoes"
-            st.session_state["cotacoes_rubrica_foco"] = rubrica_compra_id
             st.session_state["cotacoes_solicitacao_foco"] = int(compra_sel["solicitacao_id"])
             st.rerun()
 
         st.stop()
 
-    rubricas_cotacao = query("""
-    select distinct r.id, r.codigo, r.nome
-    from rubricas r
-    join solicitacoes_compra s on s.rubrica_id = r.id
+    pedidos_cotacao = query("""
+    select
+      s.id,
+      s.rubrica_id,
+      r.codigo as rubrica_codigo,
+      r.nome as rubrica_nome,
+      s.descricao,
+      s.status,
+      count(pi.id) as total_itens,
+      coalesce(sum(pi.valor_total), 0) as valor_total
+    from solicitacoes_compra s
+    join rubricas r on r.id = s.rubrica_id
     join pedido_itens pi on pi.pedido_id = s.id
     where s.autorizado=true
       and s.status in ('em_andamento','cotado','aguardando_nota','finalizado')
-    order by r.codigo, r.nome
+    group by s.id, s.rubrica_id, r.codigo, r.nome, s.descricao, s.status
+    order by s.id desc
     """)
-    solicitacoes = rubricas_cotacao
-    if len(solicitacoes) == 0:
+    if len(pedidos_cotacao) == 0:
         st.warning("Não há itens autorizados para cotação.")
     else:
-        rubricas_ids = rubricas_cotacao["id"].tolist()
-        rubrica_foco = st.session_state.pop("cotacoes_rubrica_foco", None)
-        rubrica_index = 0
-        if rubrica_foco in rubricas_ids:
-            rubrica_index = rubricas_ids.index(rubrica_foco)
-        rubrica_id = st.selectbox(
-            "Rubrica",
-            rubricas_ids,
-            index=rubrica_index,
-            format_func=lambda x: f"{rubricas_cotacao.loc[rubricas_cotacao.id==x,'codigo'].iloc[0]} - {rubricas_cotacao.loc[rubricas_cotacao.id==x,'nome'].iloc[0]}",
-        )
-        solicitacoes_rubrica = query("""
-        select
-          s.id,
-          s.descricao,
-          s.status,
-          count(pi.id) as total_itens,
-          coalesce(sum(pi.valor_total), 0) as valor_total
-        from solicitacoes_compra s
-        join pedido_itens pi on pi.pedido_id = s.id
-        where s.rubrica_id=%s
-          and s.autorizado=true
-          and s.status in ('em_andamento','cotado','aguardando_nota','finalizado')
-        group by s.id, s.descricao, s.status
-        order by s.id desc
-        """, (rubrica_id,))
-        if len(solicitacoes_rubrica) == 0:
-            st.warning("Esta rubrica ainda nao tem solicitacoes autorizadas para cotacao.")
-            st.stop()
-        solicitacoes_ids = solicitacoes_rubrica["id"].tolist()
+        pedidos_ids = pedidos_cotacao["id"].tolist()
         solicitacao_foco = st.session_state.pop("cotacoes_solicitacao_foco", None)
-        if isinstance(solicitacao_foco, list):
-            solicitacoes_default = [valor for valor in solicitacao_foco if valor in solicitacoes_ids]
-        elif solicitacao_foco in solicitacoes_ids:
-            solicitacoes_default = [solicitacao_foco]
-        else:
-            solicitacoes_default = [solicitacoes_ids[0]]
-        lote_ids_texto = st.text_input(
-            "Selecionar lote por IDs",
-            value="",
-            placeholder="Ex.: 3-60,70",
-            key=f"cotacao_lote_ids_{rubrica_id}",
-        )
-        lote_ids_parseados = []
-        lote_ids_invalidos = []
-        for parte in str(lote_ids_texto or "").replace(" ", "").split(","):
-            if not parte:
-                continue
-            try:
-                if "-" in parte:
-                    inicio, fim = parte.split("-", 1)
-                    inicio, fim = int(inicio), int(fim)
-                    if inicio > fim:
-                        inicio, fim = fim, inicio
-                    lote_ids_parseados.extend(range(inicio, fim + 1))
-                else:
-                    lote_ids_parseados.append(int(parte))
-            except ValueError:
-                lote_ids_invalidos.append(parte)
-        lote_ids_parseados = [valor for valor in dict.fromkeys(lote_ids_parseados) if valor in solicitacoes_ids]
-        selected_sids = st.multiselect(
-            "Solicitacoes do lote de cotacao",
-            solicitacoes_ids,
-            default=lote_ids_parseados or solicitacoes_default,
+        pedido_index = 0
+        if solicitacao_foco in pedidos_ids:
+            pedido_index = pedidos_ids.index(solicitacao_foco)
+        sid = st.selectbox(
+            "Pedido",
+            pedidos_ids,
+            index=pedido_index,
             format_func=lambda valor: (
                 f"#{int(valor)} - "
-                f"{solicitacoes_rubrica.loc[solicitacoes_rubrica.id == valor, 'descricao'].iloc[0][:90]} - "
-                f"{int(solicitacoes_rubrica.loc[solicitacoes_rubrica.id == valor, 'total_itens'].iloc[0])} item(ns)"
+                f"{pedidos_cotacao.loc[pedidos_cotacao.id == valor, 'rubrica_codigo'].iloc[0]} - "
+                f"{pedidos_cotacao.loc[pedidos_cotacao.id == valor, 'descricao'].iloc[0][:90]} - "
+                f"{int(pedidos_cotacao.loc[pedidos_cotacao.id == valor, 'total_itens'].iloc[0])} item(ns)"
             ),
-            key=f"cotacao_solicitacoes_{rubrica_id}",
+            key="cotacao_pedido_id",
         )
-        if lote_ids_invalidos:
-            st.warning(f"IDs invalidos ignorados: {', '.join(lote_ids_invalidos)}")
-        if lote_ids_texto and lote_ids_parseados:
-            selected_sids = lote_ids_parseados
-            st.caption(f"Lote selecionado pelo campo de IDs: {', '.join('#' + str(valor) for valor in selected_sids)}")
-        if not selected_sids:
-            st.warning("Selecione pelo menos uma solicitacao para cadastrar a cotacao.")
-            st.stop()
-        selected_sids = [int(valor) for valor in selected_sids]
-        sid = int(selected_sids[0])
-        cotacao_lote_key = "_".join(str(valor) for valor in selected_sids)
+        pedido_atual = pedidos_cotacao[pedidos_cotacao["id"] == sid].iloc[0]
+        rubrica_id = int(pedido_atual["rubrica_id"])
+        cotacao_lote_key = str(int(sid))
+        st.caption(
+            f"Rubrica vinculada: {pedido_atual['rubrica_codigo']} - {pedido_atual['rubrica_nome']} | "
+            f"Valor estimado: {format_currency_brl(pedido_atual['valor_total'])}"
+        )
         pedido_itens = query("""
         select
           pi.id,
@@ -3669,11 +3618,11 @@ elif menu == "cotacoes":
           pi.valor_total
         from pedido_itens pi
         join solicitacoes_compra s on s.id = pi.pedido_id
-        where s.id = any(%s)
+        where s.id=%s
           and s.autorizado=true
           and s.status in ('em_andamento','cotado','aguardando_nota','finalizado')
-        order by s.id, pi.created_at, pi.descricao
-        """, (selected_sids,))
+        order by pi.created_at, pi.descricao
+        """, (sid,))
         if len(pedido_itens) == 0:
             st.warning("Esta rubrica ainda não tem itens autorizados para cotação. Recrie pela tela Nova exigência ou migre os itens antes de cotar.")
             st.stop()
@@ -3695,21 +3644,11 @@ elif menu == "cotacoes":
         from cotacoes c
         left join solicitacoes_compra s on s.id = c.solicitacao_id
         left join cotacao_itens ci on ci.cotacao_id = c.id
-        left join pedido_itens pi_ci on pi_ci.id = ci.pedido_item_id and pi_ci.pedido_id = any(%s)
-        where c.rubrica_id=%s
-          and (
-            c.solicitacao_id = any(%s)
-            or exists (
-              select 1
-              from cotacao_itens ci_existe
-              join pedido_itens pi_existe on pi_existe.id = ci_existe.pedido_item_id
-              where ci_existe.cotacao_id = c.id
-                and pi_existe.pedido_id = any(%s)
-            )
-          )
+        left join pedido_itens pi_ci on pi_ci.id = ci.pedido_item_id and pi_ci.pedido_id=%s
+        where c.solicitacao_id=%s
         group by c.id, c.solicitacao_id, c.ordem, c.fornecedor, c.cnpj_cpf, c.telefone_email, c.prazo_entrega, c.arquivo_url, c.observacoes, c.valor_total
         order by c.ordem
-        """, (selected_sids, rubrica_id, selected_sids, selected_sids))
+        """, (sid, sid))
 
         def cotacao_v2_itens(cotacao_id):
             return query("""
@@ -3726,9 +3665,9 @@ elif menu == "cotacoes":
             from cotacao_itens ci
             join pedido_itens pi on pi.id = ci.pedido_item_id
             where ci.cotacao_id=%s
-              and pi.pedido_id = any(%s)
+              and pi.pedido_id=%s
             order by ci.created_at, ci.id
-            """, (cotacao_id, selected_sids))
+            """, (cotacao_id, sid))
 
         def cotacao_v2_formatar_itens(itens_df):
             tabela = itens_df.copy()
@@ -3804,7 +3743,7 @@ elif menu == "cotacoes":
             exibir_arquivos_cotacao(cotacao_atual.get("id"))
 
             st.markdown("### Adicionar item à cotação")
-            adicionar_todos = st.checkbox("Adicionar todos os itens autorizados desta solicitacao", key=f"{prefixo}_adicionar_todos")
+            adicionar_todos = st.checkbox("Adicionar todos os itens autorizados deste pedido", key=f"{prefixo}_adicionar_todos")
             if adicionar_todos:
                 itens = list(st.session_state[f"{prefixo}_itens"])
                 itens_ja_adicionados = {str(item["pedido_item_id"]) for item in itens if item.get("pedido_item_id") is not None}
@@ -3830,7 +3769,7 @@ elif menu == "cotacoes":
                     st.success(f"{len(novos_itens)} item(ns) adicionado(s) a cotacao.")
                     st.rerun()
                 else:
-                    st.info("Todos os itens autorizados desta solicitacao ja estao na cotacao.")
+                    st.info("Todos os itens autorizados deste pedido ja estao na cotacao.")
             tipos_item = ["permanente", "consumo", "servico"]
             origem_item = st.radio(
                 "Origem do item",
@@ -3839,8 +3778,10 @@ elif menu == "cotacoes":
                 key=f"{prefixo}_origem_item",
             )
             if origem_item == "Item autorizado da rubrica":
+                origem_item = "Item autorizado do pedido"
+            if origem_item == "Item autorizado do pedido":
                 item_id = st.selectbox(
-                    "Item da solicitacao",
+                    "Item do pedido",
                     pedido_itens["id"].tolist(),
                     format_func=lambda valor: (
                         f"Solicitação #{int(pedido_itens.loc[pedido_itens.id == valor, 'pedido_id'].iloc[0])} - "
@@ -4068,20 +4009,9 @@ elif menu == "cotacoes":
                         cotacao_por_ordem = query("""
                         select c.id
                         from cotacoes c
-                        where c.rubrica_id=%s
-                          and c.ordem=%s
-                          and (
-                            c.solicitacao_id = any(%s)
-                            or exists (
-                              select 1
-                              from cotacao_itens ci_existe
-                              join pedido_itens pi_existe on pi_existe.id = ci_existe.pedido_item_id
-                              where ci_existe.cotacao_id = c.id
-                                and pi_existe.pedido_id = any(%s)
-                            )
-                          )
+                        where c.solicitacao_id=%s and c.ordem=%s
                         limit 1
-                        """, (rubrica_id, ordem, selected_sids, selected_sids))
+                        """, (solicitacao_ancora_id, ordem))
                         if len(cotacao_por_ordem):
                             cotacao_salva = query("""
                             update cotacoes
