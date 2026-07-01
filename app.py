@@ -4271,6 +4271,11 @@ elif menu == "cotacoes":
             for chave, valor in valores_iniciais.items():
                 if chave not in st.session_state:
                     st.session_state[chave] = valor
+            if f"{prefixo}_valor_total_pedido" not in st.session_state:
+                try:
+                    st.session_state[f"{prefixo}_valor_total_pedido"] = float(cotacao_atual.get("valor_total") or 0)
+                except (TypeError, ValueError):
+                    st.session_state[f"{prefixo}_valor_total_pedido"] = 0.0
             if f"{prefixo}_editor_version" not in st.session_state:
                 st.session_state[f"{prefixo}_editor_version"] = 0
             if not st.session_state.get(f"{prefixo}_loaded"):
@@ -4282,6 +4287,12 @@ elif menu == "cotacoes":
             cnpj = st.text_input("CNPJ/CPF", key=f"{prefixo}_cnpj", on_change=formatar_cpf_cnpj_session_state, args=(f"{prefixo}_cnpj",))
             contato = st.text_input("Telefone/E-mail", key=f"{prefixo}_contato")
             prazo = st.text_input("Prazo de entrega", key=f"{prefixo}_prazo")
+            valor_total_pedido_input = st.number_input(
+                "Valor total do pedido",
+                min_value=0.0,
+                format="%.2f",
+                key=f"{prefixo}_valor_total_pedido",
+            )
             arquivo = st.file_uploader("Arquivo da cotação para o Google Drive", type=["pdf", "png", "jpg", "jpeg", "doc", "docx", "xls", "xlsx"], key=f"{prefixo}_arquivo")
             arquivo_url = st.text_input("Link da pasta da cotação no Google Drive", key=f"{prefixo}_arquivo_url")
             if str(arquivo_url or "").strip():
@@ -4442,7 +4453,9 @@ elif menu == "cotacoes":
             itens_editados["Valor unitario numerico"] = pd.to_numeric(itens_editados["Valor unitario"], errors="coerce").fillna(0)
             itens_editados = itens_editados[itens_editados["Remover"] != True].copy()
             itens_editados["Valor total"] = itens_editados["Quantidade"].apply(lambda valor: Decimal(str(valor))) * itens_editados["Valor unitario numerico"].apply(lambda valor: Decimal(str(valor)))
-            valor_total = Decimal(str(itens_editados["Valor total"].sum())) if len(itens_editados) else Decimal("0")
+            valor_total_itens = Decimal(str(itens_editados["Valor total"].sum())) if len(itens_editados) else Decimal("0")
+            valor_total_informado = Decimal(str(valor_total_pedido_input or 0))
+            valor_total = valor_total_informado if valor_total_informado > 0 else valor_total_itens
             if len(itens_editados):
                 resumo = itens_editados[["Item", "Tipo", "Quantidade", "Valor unitario", "Valor total", "Observacoes"]].copy()
                 resumo["Valor unitario"] = resumo["Valor unitario"].apply(format_currency_brl)
@@ -4452,6 +4465,8 @@ elif menu == "cotacoes":
             else:
                 st.info("Nenhum item adicionado.")
             st.metric("Valor total da cotação", format_currency_brl(valor_total))
+            if valor_total_informado > 0 and valor_total_informado != valor_total_itens:
+                st.caption(f"Soma dos itens: {format_currency_brl(valor_total_itens)}")
 
             texto_botao_salvar = "Salvar edição da cotação" if editando_cotacao else "Criar cotação"
             def valor_ausente(valor):
