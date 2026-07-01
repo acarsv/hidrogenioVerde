@@ -3192,6 +3192,48 @@ if menu == "orcamento":
     c5.metric("Disponível operacional", format_currency_brl(total_disponivel))
     c6.metric("Reserva técnica", format_currency_brl(total_reserva_tecnica))
 
+    def categoria_orcamento_tipo(tipo):
+        tipo_normalizado = str(tipo or "").strip().lower()
+        if "permanente" in tipo_normalizado:
+            return "Material permanente"
+        if "consumo" in tipo_normalizado:
+            return "Material de consumo"
+        if "servico" in tipo_normalizado or "servi" in tipo_normalizado:
+            return "Serviço"
+        return "Outros"
+
+    resumo_tipo_orcamento = df.copy()
+    resumo_tipo_orcamento["Categoria"] = resumo_tipo_orcamento["tipo"].apply(categoria_orcamento_tipo)
+    resumo_tipo_orcamento = (
+        resumo_tipo_orcamento
+        .groupby("Categoria", as_index=False)
+        .agg(
+            valor_orcado=("valor_orcado", "sum"),
+            valor_utilizado=("valor_utilizado", "sum"),
+            saldo_disponivel=("saldo_disponivel", "sum"),
+        )
+    )
+    ordem_categorias_orcamento = ["Material permanente", "Material de consumo", "Serviço", "Outros"]
+    resumo_tipo_orcamento["ordem"] = resumo_tipo_orcamento["Categoria"].apply(
+        lambda categoria: ordem_categorias_orcamento.index(categoria)
+        if categoria in ordem_categorias_orcamento else len(ordem_categorias_orcamento)
+    )
+    resumo_tipo_orcamento = resumo_tipo_orcamento.sort_values("ordem").drop(columns=["ordem"])
+    resumo_tipo_orcamento = (
+        pd.DataFrame({"Categoria": ordem_categorias_orcamento[:3]})
+        .merge(resumo_tipo_orcamento, on="Categoria", how="left")
+        .fillna({"valor_orcado": 0, "valor_utilizado": 0, "saldo_disponivel": 0})
+    )
+    resumo_tipo_exibicao = resumo_tipo_orcamento.rename(columns={
+        "valor_orcado": "Valor orçado",
+        "valor_utilizado": "Valor usado",
+        "saldo_disponivel": "Valor disponível",
+    })
+    for coluna in ["Valor orçado", "Valor usado", "Valor disponível"]:
+        resumo_tipo_exibicao[coluna] = resumo_tipo_exibicao[coluna].apply(format_currency_brl)
+    st.markdown("### Resumo por tipo de despesa")
+    st.dataframe(resumo_tipo_exibicao, use_container_width=True, hide_index=True)
+
     st.markdown("### Sinalização inteligente de compras")
     p1, p2, p3, p4 = st.columns(4)
     p1.metric("Período da prestação", f"{percentual_tempo_prestacao:.2f}%")
