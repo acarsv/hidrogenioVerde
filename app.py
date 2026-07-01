@@ -716,7 +716,13 @@ def upload_comprovante_bancario_google_drive(uploaded_file, compra_id, fornecedo
         raise RuntimeError(descrever_erro_oauth_refresh(exc)) from exc
 
 def upload_documento_pedido_google_drive(uploaded_file, pedido_id, categoria="documento", pasta_url=None):
-    folder_id = config_value("GOOGLE_DRIVE_DOCUMENTOS_FOLDER_ID") or config_value("GOOGLE_DRIVE_FOLDER_ID")
+    folder_id = (
+        config_value("GOOGLE_DRIVE_DOCUMENTOS_FOLDER_ID")
+        or config_value("GOOGLE_DRIVE_FOLDER_ID")
+        or config_value("GOOGLE_DRIVE_COTACOES_FOLDER_ID")
+        or config_value("GOOGLE_DRIVE_NOTAFISCAL_FOLDER_ID")
+        or config_value("GOOGLE_DRIVE_COMPROVANTES_FOLDER_ID")
+    )
     oauth_client_id = config_value("GOOGLE_OAUTH_CLIENT_ID", "CLIENT_ID")
     oauth_client_secret = config_value("GOOGLE_OAUTH_CLIENT_SECRET", "CLIENT_SECRET")
     oauth_refresh_token = config_value("GOOGLE_OAUTH_REFRESH_TOKEN", "REFRESH_TOKEN")
@@ -724,7 +730,11 @@ def upload_documento_pedido_google_drive(uploaded_file, pedido_id, categoria="do
     service_account_file = config_value("GOOGLE_APPLICATION_CREDENTIALS")
 
     if not folder_id:
-        raise RuntimeError("GOOGLE_DRIVE_DOCUMENTOS_FOLDER_ID ou GOOGLE_DRIVE_FOLDER_ID nao foi definido.")
+        raise RuntimeError(
+            "Defina pelo menos uma pasta do Google Drive nos Secrets: GOOGLE_DRIVE_DOCUMENTOS_FOLDER_ID, "
+            "GOOGLE_DRIVE_FOLDER_ID, GOOGLE_DRIVE_COTACOES_FOLDER_ID, GOOGLE_DRIVE_NOTAFISCAL_FOLDER_ID "
+            "ou GOOGLE_DRIVE_COMPROVANTES_FOLDER_ID."
+        )
     tem_oauth = bool(oauth_client_id and oauth_client_secret and oauth_refresh_token)
     if not tem_oauth and not service_account_json and not service_account_file:
         raise RuntimeError(
