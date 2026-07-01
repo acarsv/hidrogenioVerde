@@ -3955,7 +3955,7 @@ elif menu == "cotacoes":
           co.arquivo_url,
           co.observacoes,
           co.vencedora,
-          coalesce(sum(ci.valor_total), co.valor_total, 0) as valor_total,
+          coalesce(nullif(co.valor_total, 0), sum(ci.valor_total), 0) as valor_total,
           count(ci.id) as total_itens
         from cotacoes co
         left join solicitacoes_compra s on s.id = co.solicitacao_id
@@ -4181,8 +4181,8 @@ elif menu == "cotacoes":
           c.observacoes,
           count(pi_ci.id) filter (where coalesce(pi_ci.pedido_manual_id, p_ci.id, s_ci.id)=%s) as total_itens,
           coalesce(
+            nullif(c.valor_total, 0),
             sum(ci.valor_total) filter (where coalesce(pi_ci.pedido_manual_id, p_ci.id, s_ci.id)=%s),
-            c.valor_total,
             0
           ) as valor_total
         from cotacoes c
@@ -4745,7 +4745,7 @@ elif menu == "compra_nota":
       c.fornecedor,
       c.prazo_entrega,
       c.arquivo_url as "Cotação",
-      coalesce(sum(ci.valor_total), 0) as valor_total,
+      coalesce(nullif(c.valor_total, 0), sum(ci.valor_total), 0) as valor_total,
       count(ci.id) as total_itens,
       c.vencedora
     from cotacoes c
@@ -4753,7 +4753,7 @@ elif menu == "compra_nota":
     join pedido_itens pi on pi.id = ci.pedido_item_id
     where c.solicitacao_id=%s
       and pi.pedido_id=%s
-    group by c.id, c.ordem, c.fornecedor, c.prazo_entrega, c.arquivo_url, c.vencedora
+    group by c.id, c.ordem, c.fornecedor, c.prazo_entrega, c.arquivo_url, c.vencedora, c.valor_total
     order by valor_total asc, c.ordem
     """, (sid, sid))
 
