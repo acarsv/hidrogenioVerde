@@ -1240,12 +1240,25 @@ def ensure_financial_governance_schema():
     ),
     comprovante_resumo as (
         select
-            cb.compra_id,
+            pedido_comprovante.pedido_id,
             count(cb.id) as total_comprovantes_bancarios,
             string_agg(distinct cb.nome_arquivo, ', ') as comprovantes_bancarios,
             bool_or(cb.google_drive_link is not null and trim(cb.google_drive_link) <> '') as tem_comprovante_bancario
         from comprovantes_bancarios cb
-        group by cb.compra_id
+        join compras c on c.id = cb.compra_id
+        join lateral (
+            select distinct
+                coalesce(pi_ci.pedido_manual_id, ped_ci.id, s_ci.id, pi_s.pedido_manual_id, ped_s.id, s.id) as pedido_id
+            from solicitacoes_compra s
+            left join cotacao_itens ci on ci.cotacao_id = c.cotacao_vencedora_id
+            left join pedido_itens pi_ci on pi_ci.id = ci.pedido_item_id
+            left join solicitacoes_compra s_ci on s_ci.id = pi_ci.pedido_id
+            left join pedidos ped_ci on ped_ci.solicitacao_id = s_ci.id
+            left join pedido_itens pi_s on pi_s.pedido_id = s.id
+            left join pedidos ped_s on ped_s.solicitacao_id = s.id
+            where s.id = c.solicitacao_id
+        ) pedido_comprovante on pedido_comprovante.pedido_id is not null
+        group by pedido_comprovante.pedido_id
     ),
     destino_resumo as (
         select
@@ -1262,6 +1275,7 @@ def ensure_financial_governance_schema():
     )
     select
         pi.id as pedido_item_id,
+        coalesce(pi.pedido_manual_id, ped.id, s.id) as pedido_id,
         s.id as solicitacao_id,
         c.id as compra_id,
         r.id as rubrica_id,
@@ -1348,10 +1362,11 @@ def ensure_financial_governance_schema():
     from pedido_itens pi
     join solicitacoes_compra s on s.id = pi.pedido_id
     join rubricas r on r.id = pi.rubrica_id
+    left join pedidos ped on ped.solicitacao_id = s.id
     left join compras c on c.solicitacao_id = s.id
     left join cotacao_resumo cr on cr.pedido_item_id = pi.id
     left join nota_resumo nr on nr.pedido_item_id = pi.id
-    left join comprovante_resumo cbr on cbr.compra_id = c.id
+    left join comprovante_resumo cbr on cbr.pedido_id = coalesce(pi.pedido_manual_id, ped.id, s.id)
     left join destino_resumo dr on dr.pedido_item_id = pi.id
     where s.status <> 'cancelado';
     select pg_advisory_unlock(2026052601);
