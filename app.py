@@ -715,6 +715,116 @@ def upload_comprovante_bancario_google_drive(uploaded_file, compra_id, fornecedo
     except RefreshError as exc:
         raise RuntimeError(descrever_erro_oauth_refresh(exc)) from exc
 
+def upload_documento_pedido_google_drive(uploaded_file, pedido_id, categoria="documento", pasta_url=None):
+    folder_id = config_value("GOOGLE_DRIVE_DOCUMENTOS_FOLDER_ID") or config_value("GOOGLE_DRIVE_FOLDER_ID")
+    oauth_client_id = config_value("GOOGLE_OAUTH_CLIENT_ID", "CLIENT_ID")
+    oauth_client_secret = config_value("GOOGLE_OAUTH_CLIENT_SECRET", "CLIENT_SECRET")
+    oauth_refresh_token = config_value("GOOGLE_OAUTH_REFRESH_TOKEN", "REFRESH_TOKEN")
+    service_account_json = config_value("GOOGLE_SERVICE_ACCOUNT_JSON")
+    service_account_file = config_value("GOOGLE_APPLICATION_CREDENTIALS")
+
+    if not folder_id:
+        raise RuntimeError("GOOGLE_DRIVE_DOCUMENTOS_FOLDER_ID ou GOOGLE_DRIVE_FOLDER_ID nao foi definido.")
+    tem_oauth = bool(oauth_client_id and oauth_client_secret and oauth_refresh_token)
+    if not tem_oauth and not service_account_json and not service_account_file:
+        raise RuntimeError(
+            "Defina GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET e GOOGLE_OAUTH_REFRESH_TOKEN "
+            "ou GOOGLE_SERVICE_ACCOUNT_JSON no Streamlit Secrets ou no .env."
+        )
+
+    try:
+        from google.oauth2.credentials import Credentials
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaIoBaseUpload
+        from googleapiclient.errors import HttpError
+        from google.auth.exceptions import RefreshError
+    except ImportError as exc:
+        raise RuntimeError(
+            "Dependencias do Google Drive ausentes. Instale google-api-python-client e google-auth."
+        ) from exc
+
+    scopes = ["https://www.googleapis.com/auth/drive"]
+    if tem_oauth:
+        credentials = Credentials(
+            token=None,
+            refresh_token=oauth_refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=oauth_client_id,
+            client_secret=oauth_client_secret,
+            scopes=scopes,
+        )
+    elif service_account_json:
+        credentials = service_account.Credentials.from_service_account_info(
+            carregar_service_account_info(service_account_json),
+            scopes=scopes,
+        )
+    else:
+        credentials = service_account.Credentials.from_service_account_file(
+            service_account_file,
+            scopes=scopes,
+        )
+
+    try:
+        service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+        parent_folder_id = extrair_google_drive_folder_id(pasta_url) or folder_id
+        pasta_nome = f"pedido_{pedido_id}_documentos"
+        pastas = service.files().list(
+            q=(
+                f"'{parent_folder_id}' in parents and "
+                "mimeType = 'application/vnd.google-apps.folder' and "
+                f"name = '{escapar_drive_query(pasta_nome)}' and trashed = false"
+            ),
+            fields="files(id, name)",
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+        ).execute().get("files", [])
+        if pastas:
+            pasta_id = pastas[0]["id"]
+        else:
+            pasta = service.files().create(
+                body={
+                    "name": pasta_nome,
+                    "mimeType": "application/vnd.google-apps.folder",
+                    "parents": [parent_folder_id],
+                },
+                fields="id",
+                supportsAllDrives=True,
+            ).execute()
+            pasta_id = pasta["id"]
+
+        pasta_confirmada = service.files().get(
+            fileId=pasta_id,
+            fields="id, webViewLink",
+            supportsAllDrives=True,
+        ).execute()
+        filename = uploaded_file.name
+        content_type = uploaded_file.type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        conteudo = uploaded_file.getvalue()
+        media = MediaIoBaseUpload(BytesIO(conteudo), mimetype=content_type, resumable=False)
+        criado = service.files().create(
+            body={
+                "name": f"pedido_{pedido_id}_{nome_seguro_drive(categoria)}_{filename}",
+                "parents": [pasta_id],
+            },
+            media_body=media,
+            fields="id, name, parents, webViewLink",
+            supportsAllDrives=True,
+        ).execute()
+        return {
+            "folder_id": pasta_id,
+            "folder_link": pasta_confirmada.get("webViewLink") or google_drive_folder_url(pasta_id),
+            "file_id": criado.get("id"),
+            "file_link": criado.get("webViewLink"),
+            "nome_arquivo": filename,
+            "mime_type": content_type,
+            "tamanho_bytes": getattr(uploaded_file, "size", None) or len(conteudo),
+        }
+    except HttpError as exc:
+        raise RuntimeError(descrever_erro_google_drive(exc, "GOOGLE_DRIVE_DOCUMENTOS_FOLDER_ID ou GOOGLE_DRIVE_FOLDER_ID")) from exc
+    except RefreshError as exc:
+        raise RuntimeError(descrever_erro_oauth_refresh(exc)) from exc
+
 def has_column(table_name: str, column_name: str) -> bool:
     df = query("""
     select 1
@@ -921,6 +1031,24 @@ def ensure_financial_governance_schema():
       criado_em timestamptz not null default now()
     )
     """)
+    execute("""
+    create table if not exists pedido_documentos (
+      id bigserial primary key,
+      pedido_id bigint not null,
+      solicitacao_id bigint references solicitacoes_compra(id) on delete set null,
+      categoria text not null default 'documento',
+      google_drive_file_id text,
+      google_drive_link text,
+      pasta_google_drive_link text,
+      nome_arquivo text not null,
+      mime_type text,
+      tamanho_bytes bigint,
+      observacao text,
+      enviado_por uuid references usuarios_app(id),
+      criado_em timestamptz not null default now()
+    )
+    """)
+    execute("create index if not exists idx_pedido_documentos_pedido_id on pedido_documentos(pedido_id)")
     execute("""
     create table if not exists valores_extra_nao_debitados (
       id bigserial primary key,
@@ -1231,7 +1359,7 @@ def ensure_permissions_schema():
 
     execute("""
     update usuarios_app
-    set permissoes = array['orcamento','nova_exigencia','solicitacoes','cotacoes','compra_nota','comprovantes_bancarios','pedidos_finalizados','destino_final','auditoria','ia_operacional','itens_comprados','membros']
+    set permissoes = array['orcamento','nova_exigencia','solicitacoes','cotacoes','compra_nota','comprovantes_bancarios','documentos','pedidos_finalizados','destino_final','auditoria','ia_operacional','itens_comprados','membros']
     where papel = 'admin' and (permissoes is null or cardinality(permissoes) = 0)
     """)
     execute("""
@@ -1243,6 +1371,11 @@ def ensure_permissions_schema():
     update usuarios_app
     set permissoes = array_append(permissoes, 'pedidos_finalizados')
     where papel = 'admin' and not ('pedidos_finalizados' = any(permissoes))
+    """)
+    execute("""
+    update usuarios_app
+    set permissoes = array_append(permissoes, 'documentos')
+    where papel = 'admin' and not ('documentos' = any(permissoes))
     """)
 
 def hash_password(password: str) -> str:
@@ -2842,6 +2975,7 @@ BASE_MENU_OPTIONS = [
     ("cotacoes", "Cotações"),
     ("compra_nota", "Compra e nota fiscal"),
     ("comprovantes_bancarios", "Comprovantes bancários"),
+    ("documentos", "Documentos"),
     ("pedidos_finalizados", "Pedidos finalizados"),
     ("destino_final", "Destino final"),
     ("auditoria", "Auditoria"),
@@ -5310,6 +5444,396 @@ elif menu == "comprovantes_bancarios":
                         int(comprovante_id),
                     ))
                 st.success("Comprovante bancario atualizado.")
+                st.rerun()
+
+elif menu == "documentos":
+    st.markdown("### Documentos")
+    pedidos_documentos = query("""
+    with item_base as (
+      select
+        coalesce(pi.pedido_manual_id, p.id, s.id) as pedido_id,
+        s.id as solicitacao_id,
+        r.codigo as rubrica,
+        r.nome as rubrica_nome,
+        pi.descricao
+      from pedido_itens pi
+      join solicitacoes_compra s on s.id = pi.pedido_id
+      join rubricas r on r.id = pi.rubrica_id
+      left join pedidos p on p.solicitacao_id = s.id
+      where s.status <> 'cancelado'
+    )
+    select
+      pedido_id,
+      array_agg(distinct solicitacao_id order by solicitacao_id) as solicitacao_ids,
+      string_agg(distinct '#' || solicitacao_id::text, ', ') as solicitacoes,
+      string_agg(distinct rubrica || ' - ' || rubrica_nome, '; ') as rubricas,
+      count(*) as total_itens,
+      string_agg(distinct descricao, '; ') as itens
+    from item_base
+    group by pedido_id
+    order by pedido_id desc
+    """)
+    if len(pedidos_documentos) == 0:
+        st.info("Ainda nao ha pedidos com itens para documentos.")
+        st.stop()
+
+    pedido_doc_id = st.selectbox(
+        "Pedido",
+        pedidos_documentos["pedido_id"].tolist(),
+        format_func=lambda valor: (
+            f"Pedido #{int(valor)} - "
+            f"{pedidos_documentos.loc[pedidos_documentos.pedido_id == valor, 'solicitacoes'].iloc[0]} - "
+            f"{int(pedidos_documentos.loc[pedidos_documentos.pedido_id == valor, 'total_itens'].iloc[0])} item(ns)"
+        ),
+        key="documentos_pedido_id",
+    )
+    pedido_doc = pedidos_documentos[pedidos_documentos["pedido_id"] == pedido_doc_id].iloc[0]
+    solicitacao_ids = [int(valor) for valor in pedido_doc["solicitacao_ids"]]
+    st.caption(f"Rubricas: {pedido_doc['rubricas']}")
+
+    cotacoes_doc = query("""
+    select
+      c.id,
+      c.solicitacao_id,
+      c.ordem,
+      c.fornecedor,
+      c.rubrica_id,
+      coalesce(r.codigo, '-') as rubrica
+    from cotacoes c
+    left join rubricas r on r.id = c.rubrica_id
+    where c.solicitacao_id = any(%s::bigint[])
+    order by c.solicitacao_id, c.ordem, c.id
+    """, (solicitacao_ids,))
+    notas_doc = query("""
+    select
+      nf.id,
+      nf.compra_id,
+      coalesce(nf.solicitacao_id, c.solicitacao_id) as solicitacao_id,
+      nf.numero_nf,
+      nf.fornecedor,
+      nf.valor_nf
+    from notas_fiscais nf
+    left join compras c on c.id = nf.compra_id
+    where coalesce(nf.solicitacao_id, c.solicitacao_id) = any(%s::bigint[])
+    order by nf.lancado_em desc nulls last, nf.id desc
+    """, (solicitacao_ids,))
+    compras_doc = query("""
+    select
+      c.id,
+      c.solicitacao_id,
+      c.valor_compra,
+      coalesce(co.fornecedor, '-') as fornecedor
+    from compras c
+    left join cotacoes co on co.id = c.cotacao_vencedora_id
+    where c.solicitacao_id = any(%s::bigint[])
+    order by c.comprado_em desc nulls last, c.id desc
+    """, (solicitacao_ids,))
+
+    docs_cotacao = query("""
+    select
+      'cotacao' as origem,
+      ca.id,
+      c.id as alvo_id,
+      c.solicitacao_id,
+      'Cotacao ' || c.ordem::text || ' - ' || coalesce(c.fornecedor, '-') as alvo,
+      ca.nome_arquivo,
+      ca.google_drive_link,
+      null::text as observacao,
+      ca.criado_em
+    from cotacao_arquivos ca
+    join cotacoes c on c.id = ca.cotacao_id
+    where c.solicitacao_id = any(%s::bigint[])
+    """, (solicitacao_ids,))
+    docs_nf = query("""
+    select
+      'nota_fiscal' as origem,
+      nfa.id,
+      nf.id as alvo_id,
+      coalesce(nf.solicitacao_id, c.solicitacao_id) as solicitacao_id,
+      'NF ' || nf.numero_nf || ' - ' || nf.fornecedor as alvo,
+      nfa.nome_arquivo,
+      nfa.google_drive_link,
+      null::text as observacao,
+      nfa.criado_em
+    from nota_fiscal_arquivos nfa
+    join notas_fiscais nf on nf.id = nfa.nota_fiscal_id
+    left join compras c on c.id = nf.compra_id
+    where coalesce(nf.solicitacao_id, c.solicitacao_id) = any(%s::bigint[])
+    """, (solicitacao_ids,))
+    docs_comprovante = query("""
+    select
+      'comprovante' as origem,
+      cb.id,
+      cb.compra_id as alvo_id,
+      c.solicitacao_id,
+      'Compra #' || cb.compra_id::text as alvo,
+      cb.nome_arquivo,
+      cb.google_drive_link,
+      cb.observacao,
+      cb.criado_em
+    from comprovantes_bancarios cb
+    join compras c on c.id = cb.compra_id
+    where c.solicitacao_id = any(%s::bigint[])
+    """, (solicitacao_ids,))
+    docs_gerais = query("""
+    select
+      'documento' as origem,
+      id,
+      pedido_id as alvo_id,
+      solicitacao_id,
+      coalesce(categoria, 'documento') as alvo,
+      nome_arquivo,
+      google_drive_link,
+      observacao,
+      criado_em
+    from pedido_documentos
+    where pedido_id=%s
+    """, (int(pedido_doc_id),))
+
+    documentos = pd.concat([docs_cotacao, docs_nf, docs_comprovante, docs_gerais], ignore_index=True)
+    if len(documentos):
+        documentos["doc_key"] = documentos.apply(lambda row: f"{row['origem']}:{int(row['id'])}", axis=1)
+        tabela_documentos = documentos.copy()
+        tabela_documentos["Tipo"] = tabela_documentos["origem"].map({
+            "cotacao": "Cotacao",
+            "nota_fiscal": "Nota fiscal",
+            "comprovante": "Comprovante",
+            "documento": "Documento vinculado",
+        }).fillna(tabela_documentos["origem"])
+        tabela_documentos = tabela_documentos.rename(columns={
+            "alvo": "Vinculo",
+            "nome_arquivo": "Arquivo",
+            "google_drive_link": "Link",
+            "observacao": "Observacao",
+            "criado_em": "Criado em",
+        })
+        st.dataframe(
+            tabela_documentos[["Tipo", "Vinculo", "Arquivo", "Link", "Observacao", "Criado em"]],
+            use_container_width=True,
+            hide_index=True,
+            column_config={"Link": st.column_config.LinkColumn("Abrir")},
+        )
+    else:
+        documentos = pd.DataFrame(columns=["doc_key"])
+        st.info("Este pedido ainda nao tem documentos vinculados.")
+
+    modo_documento = st.radio(
+        "Acao",
+        ["Adicionar documento", "Editar documento existente", "Deletar documento"],
+        horizontal=True,
+        key=f"documentos_modo_{pedido_doc_id}",
+    )
+
+    if modo_documento == "Adicionar documento":
+        destino_documento = st.selectbox(
+            "Destino do documento",
+            ["cotacao", "nota_fiscal", "comprovante", "documento"],
+            format_func=lambda valor: {
+                "cotacao": "Cotacao",
+                "nota_fiscal": "Nota fiscal",
+                "comprovante": "Comprovante",
+                "documento": "Documentos vinculados",
+            }[valor],
+            key=f"documentos_destino_{pedido_doc_id}",
+        )
+        alvo_id = None
+        if destino_documento == "cotacao":
+            if len(cotacoes_doc) == 0:
+                st.warning("Este pedido ainda nao tem cotacoes.")
+            else:
+                alvo_id = st.selectbox(
+                    "Cotacao",
+                    cotacoes_doc["id"].tolist(),
+                    format_func=lambda valor: (
+                        f"Solicitacao #{int(cotacoes_doc.loc[cotacoes_doc.id == valor, 'solicitacao_id'].iloc[0])} - "
+                        f"Cotacao {int(cotacoes_doc.loc[cotacoes_doc.id == valor, 'ordem'].iloc[0])} - "
+                        f"{cotacoes_doc.loc[cotacoes_doc.id == valor, 'fornecedor'].iloc[0]}"
+                    ),
+                    key=f"documentos_cotacao_alvo_{pedido_doc_id}",
+                )
+        elif destino_documento == "nota_fiscal":
+            if len(notas_doc) == 0:
+                st.warning("Este pedido ainda nao tem notas fiscais.")
+            else:
+                alvo_id = st.selectbox(
+                    "Nota fiscal",
+                    notas_doc["id"].tolist(),
+                    format_func=lambda valor: (
+                        f"NF {notas_doc.loc[notas_doc.id == valor, 'numero_nf'].iloc[0]} - "
+                        f"{notas_doc.loc[notas_doc.id == valor, 'fornecedor'].iloc[0]}"
+                    ),
+                    key=f"documentos_nf_alvo_{pedido_doc_id}",
+                )
+        elif destino_documento == "comprovante":
+            if len(compras_doc) == 0:
+                st.warning("Este pedido ainda nao tem compra.")
+            else:
+                alvo_id = st.selectbox(
+                    "Compra",
+                    compras_doc["id"].tolist(),
+                    format_func=lambda valor: (
+                        f"Compra #{int(valor)} - "
+                        f"{compras_doc.loc[compras_doc.id == valor, 'fornecedor'].iloc[0]} - "
+                        f"{format_currency_brl(compras_doc.loc[compras_doc.id == valor, 'valor_compra'].iloc[0])}"
+                    ),
+                    key=f"documentos_compra_alvo_{pedido_doc_id}",
+                )
+
+        arquivo_documento = st.file_uploader(
+            "Arquivo",
+            type=["pdf", "png", "jpg", "jpeg", "doc", "docx", "xls", "xlsx", "csv"],
+            key=f"documentos_upload_{pedido_doc_id}_{destino_documento}",
+        )
+        observacao_documento = st.text_area("Observacao", key=f"documentos_obs_{pedido_doc_id}_{destino_documento}")
+        pasta_documento = st.text_input("Link da pasta no Google Drive (opcional)", key=f"documentos_pasta_{pedido_doc_id}_{destino_documento}")
+        if st.button("Adicionar documento", type="primary", use_container_width=True, key=f"documentos_adicionar_{pedido_doc_id}"):
+            if arquivo_documento is None:
+                st.error("Selecione um arquivo.")
+            elif destino_documento != "documento" and alvo_id is None:
+                st.error("Selecione o destino do documento.")
+            elif destino_documento == "cotacao":
+                cotacao = cotacoes_doc[cotacoes_doc["id"] == alvo_id].iloc[0]
+                upload = upload_cotacao_google_drive(
+                    arquivo_documento,
+                    int(cotacao["solicitacao_id"]),
+                    int(cotacao["ordem"]),
+                    rubrica_id=int(cotacao["rubrica_id"]) if cotacao["rubrica_id"] is not None and not pd.isna(cotacao["rubrica_id"]) else None,
+                    fornecedor=str(cotacao["fornecedor"] or ""),
+                    pasta_url=pasta_documento.strip() or None,
+                )
+                execute("""
+                insert into cotacao_arquivos (cotacao_id, google_drive_file_id, google_drive_link, nome_arquivo, mime_type, tamanho_bytes)
+                values (%s,%s,%s,%s,%s,%s)
+                """, (int(alvo_id), upload["file_id"], upload["file_link"], upload["nome_arquivo"], upload["mime_type"], upload["tamanho_bytes"]))
+                st.success("Documento de cotacao adicionado.")
+                st.rerun()
+            elif destino_documento == "nota_fiscal":
+                nota = notas_doc[notas_doc["id"] == alvo_id].iloc[0]
+                upload = upload_nota_fiscal_google_drive(
+                    arquivo_documento,
+                    str(nota["numero_nf"] or ""),
+                    str(nota["fornecedor"] or ""),
+                    pasta_url=pasta_documento.strip() or None,
+                )
+                execute("""
+                insert into nota_fiscal_arquivos (nota_fiscal_id, google_drive_file_id, google_drive_link, nome_arquivo, mime_type, tamanho_bytes)
+                values (%s,%s,%s,%s,%s,%s)
+                """, (int(alvo_id), upload["file_id"], upload["file_link"], upload["nome_arquivo"], upload["mime_type"], upload["tamanho_bytes"]))
+                st.success("Documento de nota fiscal adicionado.")
+                st.rerun()
+            elif destino_documento == "comprovante":
+                compra = compras_doc[compras_doc["id"] == alvo_id].iloc[0]
+                upload = upload_comprovante_bancario_google_drive(
+                    arquivo_documento,
+                    int(alvo_id),
+                    fornecedor=str(compra["fornecedor"] or ""),
+                    pasta_url=pasta_documento.strip() or None,
+                )
+                execute("""
+                insert into comprovantes_bancarios (
+                    compra_id, nota_fiscal_id, google_drive_file_id, google_drive_link,
+                    pasta_google_drive_link, nome_arquivo, mime_type, tamanho_bytes, observacao, enviado_por
+                ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (
+                    int(alvo_id),
+                    None,
+                    upload["file_id"],
+                    upload["file_link"],
+                    upload["folder_link"],
+                    upload["nome_arquivo"],
+                    upload["mime_type"],
+                    upload["tamanho_bytes"],
+                    observacao_documento.strip() or None,
+                    user["id"],
+                ))
+                st.success("Comprovante adicionado.")
+                st.rerun()
+            else:
+                upload = upload_documento_pedido_google_drive(
+                    arquivo_documento,
+                    int(pedido_doc_id),
+                    categoria="documento",
+                    pasta_url=pasta_documento.strip() or None,
+                )
+                execute("""
+                insert into pedido_documentos (
+                    pedido_id, solicitacao_id, categoria, google_drive_file_id, google_drive_link,
+                    pasta_google_drive_link, nome_arquivo, mime_type, tamanho_bytes, observacao, enviado_por
+                ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (
+                    int(pedido_doc_id),
+                    solicitacao_ids[0] if solicitacao_ids else None,
+                    "documento",
+                    upload["file_id"],
+                    upload["file_link"],
+                    upload["folder_link"],
+                    upload["nome_arquivo"],
+                    upload["mime_type"],
+                    upload["tamanho_bytes"],
+                    observacao_documento.strip() or None,
+                    user["id"],
+                ))
+                st.success("Documento vinculado adicionado.")
+                st.rerun()
+
+    elif modo_documento == "Editar documento existente":
+        if len(documentos) == 0:
+            st.info("Nao ha documentos para editar.")
+        else:
+            doc_key = st.selectbox(
+                "Documento",
+                documentos["doc_key"].tolist(),
+                format_func=lambda valor: (
+                    f"{documentos.loc[documentos.doc_key == valor, 'origem'].iloc[0]} - "
+                    f"{documentos.loc[documentos.doc_key == valor, 'nome_arquivo'].iloc[0]}"
+                ),
+                key=f"documentos_editar_key_{pedido_doc_id}",
+            )
+            documento = documentos[documentos["doc_key"] == doc_key].iloc[0]
+            novo_nome = st.text_input("Nome do arquivo", value=str(documento["nome_arquivo"] or ""), key=f"documentos_editar_nome_{doc_key}")
+            novo_link = st.text_input("Link", value=str(documento["google_drive_link"] or ""), key=f"documentos_editar_link_{doc_key}")
+            nova_observacao = st.text_area("Observacao", value=str(documento.get("observacao") or ""), key=f"documentos_editar_obs_{doc_key}")
+            if st.button("Salvar documento", type="primary", use_container_width=True, key=f"documentos_salvar_{doc_key}"):
+                origem = str(documento["origem"])
+                doc_id = int(documento["id"])
+                if origem == "cotacao":
+                    execute("update cotacao_arquivos set nome_arquivo=%s, google_drive_link=%s where id=%s", (novo_nome.strip(), novo_link.strip() or None, doc_id))
+                elif origem == "nota_fiscal":
+                    execute("update nota_fiscal_arquivos set nome_arquivo=%s, google_drive_link=%s where id=%s", (novo_nome.strip(), novo_link.strip() or None, doc_id))
+                elif origem == "comprovante":
+                    execute("update comprovantes_bancarios set nome_arquivo=%s, google_drive_link=%s, observacao=%s where id=%s", (novo_nome.strip(), novo_link.strip() or None, nova_observacao.strip() or None, doc_id))
+                else:
+                    execute("update pedido_documentos set nome_arquivo=%s, google_drive_link=%s, observacao=%s where id=%s", (novo_nome.strip(), novo_link.strip() or None, nova_observacao.strip() or None, doc_id))
+                st.success("Documento atualizado.")
+                st.rerun()
+
+    else:
+        if len(documentos) == 0:
+            st.info("Nao ha documentos para deletar.")
+        else:
+            doc_key = st.selectbox(
+                "Documento",
+                documentos["doc_key"].tolist(),
+                format_func=lambda valor: (
+                    f"{documentos.loc[documentos.doc_key == valor, 'origem'].iloc[0]} - "
+                    f"{documentos.loc[documentos.doc_key == valor, 'nome_arquivo'].iloc[0]}"
+                ),
+                key=f"documentos_deletar_key_{pedido_doc_id}",
+            )
+            confirmar_delete = st.checkbox("Confirmo remover o vinculo deste documento.", key=f"documentos_confirmar_delete_{doc_key}")
+            if st.button("Deletar documento", type="primary", use_container_width=True, disabled=not confirmar_delete, key=f"documentos_deletar_{doc_key}"):
+                documento = documentos[documentos["doc_key"] == doc_key].iloc[0]
+                origem = str(documento["origem"])
+                doc_id = int(documento["id"])
+                if origem == "cotacao":
+                    execute("delete from cotacao_arquivos where id=%s", (doc_id,))
+                elif origem == "nota_fiscal":
+                    execute("delete from nota_fiscal_arquivos where id=%s", (doc_id,))
+                elif origem == "comprovante":
+                    execute("delete from comprovantes_bancarios where id=%s", (doc_id,))
+                else:
+                    execute("delete from pedido_documentos where id=%s", (doc_id,))
+                st.success("Documento removido.")
                 st.rerun()
 
 elif menu == "pedidos_finalizados":
