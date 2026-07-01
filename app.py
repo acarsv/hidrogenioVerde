@@ -2939,13 +2939,36 @@ def sincronizar_orcamento():
     update rubricas r
     set valor_utilizado = totais.valor_total
     from (
+        with compra_base as (
+            select distinct
+              c.id as compra_id,
+              coalesce(pi_ci.pedido_manual_id, ped_ci.id, s_ci.id, pi_s.pedido_manual_id, ped_s.id, s.id) as pedido_id,
+              coalesce(cot.rubrica_id, s.rubrica_id) as rubrica_id,
+              c.valor_compra,
+              c.comprado_em
+            from compras c
+            join solicitacoes_compra s on s.id = c.solicitacao_id
+            left join cotacoes cot on cot.id = c.cotacao_vencedora_id
+            left join cotacao_itens ci on ci.cotacao_id = c.cotacao_vencedora_id
+            left join pedido_itens pi_ci on pi_ci.id = ci.pedido_item_id
+            left join solicitacoes_compra s_ci on s_ci.id = pi_ci.pedido_id
+            left join pedidos ped_ci on ped_ci.solicitacao_id = s_ci.id
+            left join pedido_itens pi_s on pi_s.pedido_id = s.id
+            left join pedidos ped_s on ped_s.solicitacao_id = s.id
+        ),
+        compra_unica as (
+            select distinct on (rubrica_id, pedido_id)
+              rubrica_id,
+              valor_compra
+            from compra_base
+            where pedido_id is not null
+            order by rubrica_id, pedido_id, comprado_em desc nulls last, compra_id desc
+        )
         select
-          coalesce(cot.rubrica_id, s.rubrica_id) as rubrica_id,
-          coalesce(sum(c.valor_compra), 0) as valor_total
-        from compras c
-        join solicitacoes_compra s on s.id = c.solicitacao_id
-        left join cotacoes cot on cot.id = c.cotacao_vencedora_id
-        group by coalesce(cot.rubrica_id, s.rubrica_id)
+          rubrica_id,
+          coalesce(sum(valor_compra), 0) as valor_total
+        from compra_unica
+        group by rubrica_id
     ) totais
     where r.id = totais.rubrica_id
     """)
@@ -4921,14 +4944,38 @@ elif menu == "compra_nota":
             execute("update cotacao_itens set vencedor=true where cotacao_id=%s", (int(cotacao_vencedora_id),))
             execute("update cotacoes set vencedora=true where id=%s", (int(cotacao_vencedora_id),))
             valor = Decimal(str(cotacoes_resumo.loc[cotacoes_resumo.id == cotacao_vencedora_id, "valor_total"].iloc[0]))
-            execute("""
-            insert into compras (solicitacao_id,cotacao_vencedora_id,valor_compra,comprador_id)
-            values (%s,%s,%s,%s)
-            on conflict (solicitacao_id) do update set
-              cotacao_vencedora_id=excluded.cotacao_vencedora_id,
-              valor_compra=excluded.valor_compra,
-              comprador_id=excluded.comprador_id
-            """, (sid, int(cotacao_vencedora_id), valor, user["id"]))
+            compra_existente_pedido = query("""
+            with grupo_solicitacoes as (
+              select distinct pi.pedido_id as solicitacao_id
+              from pedido_itens pi
+              join solicitacoes_compra s on s.id = pi.pedido_id
+              left join pedidos p on p.solicitacao_id = s.id
+              where coalesce(pi.pedido_manual_id, p.id, s.id)=%s
+            )
+            select c.id
+            from compras c
+            where c.solicitacao_id in (select solicitacao_id from grupo_solicitacoes)
+               or c.cotacao_vencedora_id=%s
+            order by c.comprado_em desc nulls last, c.id desc
+            limit 1
+            """, (pedido_compra_id, int(cotacao_vencedora_id)))
+            if len(compra_existente_pedido):
+                compra_id_registrada = int(compra_existente_pedido.iloc[0]["id"])
+                execute("""
+                update compras
+                set solicitacao_id=%s,
+                    cotacao_vencedora_id=%s,
+                    valor_compra=%s,
+                    comprador_id=%s
+                where id=%s
+                """, (sid, int(cotacao_vencedora_id), valor, user["id"], compra_id_registrada))
+            else:
+                compra_criada = query("""
+                insert into compras (solicitacao_id,cotacao_vencedora_id,valor_compra,comprador_id)
+                values (%s,%s,%s,%s)
+                returning id
+                """, (sid, int(cotacao_vencedora_id), valor, user["id"]))
+                compra_id_registrada = int(compra_criada.iloc[0]["id"])
             pedido_item_ids = [str(valor_item_id) for valor_item_id in itens_cotacao_selecionada["pedido_item_id"].dropna().tolist()]
             if pedido_item_ids:
                 solicitacoes_compra_vencedora = query("""
