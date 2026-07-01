@@ -4059,22 +4059,37 @@ elif menu == "cotacoes":
         st.stop()
 
     pedidos_cotacao = query("""
+    with item_base as (
+      select
+        coalesce(pi.pedido_manual_id, p.id, s.id) as id,
+        pi.id as pedido_item_id,
+        pi.pedido_id as solicitacao_id,
+        pi.rubrica_id,
+        r.codigo as rubrica_codigo,
+        r.nome as rubrica_nome,
+        pi.descricao,
+        pi.valor_total,
+        coalesce(p.criado_em, s.criado_em) as criado_em
+      from pedido_itens pi
+      join solicitacoes_compra s on s.id = pi.pedido_id
+      join rubricas r on r.id = pi.rubrica_id
+      left join pedidos p on p.solicitacao_id = s.id
+      where s.autorizado=true
+        and s.status in ('em_andamento','cotado','aguardando_nota','finalizado')
+    )
     select
-      s.id,
-      s.rubrica_id,
-      r.codigo as rubrica_codigo,
-      r.nome as rubrica_nome,
-      s.descricao,
-      s.status,
-      count(pi.id) as total_itens,
-      coalesce(sum(pi.valor_total), 0) as valor_total
-    from solicitacoes_compra s
-    join rubricas r on r.id = s.rubrica_id
-    join pedido_itens pi on pi.pedido_id = s.id
-    where s.autorizado=true
-      and s.status in ('em_andamento','cotado','aguardando_nota','finalizado')
-    group by s.id, s.rubrica_id, r.codigo, r.nome, s.descricao, s.status
-    order by s.id desc
+      id,
+      min(solicitacao_id) as solicitacao_ancora_id,
+      min(rubrica_id) as rubrica_id,
+      string_agg(distinct rubrica_codigo::text, ', ') as rubrica_codigo,
+      string_agg(distinct rubrica_nome::text, ', ') as rubrica_nome,
+      min(descricao) as descricao,
+      count(distinct pedido_item_id) as total_itens,
+      coalesce(sum(valor_total), 0) as valor_total,
+      max(criado_em) as criado_em
+    from item_base
+    group by id
+    order by max(criado_em) desc, id desc
     """)
     if len(pedidos_cotacao) == 0:
         st.warning("Não há itens autorizados para cotação.")
@@ -4084,6 +4099,10 @@ elif menu == "cotacoes":
         pedido_index = 0
         if solicitacao_foco in pedidos_ids:
             pedido_index = pedidos_ids.index(solicitacao_foco)
+        elif solicitacao_foco is not None and len(pedidos_cotacao):
+            foco = pedidos_cotacao[pedidos_cotacao["solicitacao_ancora_id"].astype(str) == str(solicitacao_foco)]
+            if len(foco):
+                pedido_index = pedidos_ids.index(foco.iloc[0]["id"])
         sid = st.selectbox(
             "Pedido",
             pedidos_ids,
@@ -4107,7 +4126,10 @@ elif menu == "cotacoes":
         select
           pi.id,
           pi.pedido_id,
+          coalesce(pi.pedido_manual_id, p.id, s.id) as pedido_grupo_id,
           s.descricao as solicitacao,
+          r.codigo as rubrica_codigo,
+          r.nome as rubrica_nome,
           pi.descricao,
           pi.tipo_item,
           pi.quantidade,
@@ -4115,7 +4137,9 @@ elif menu == "cotacoes":
           pi.valor_total
         from pedido_itens pi
         join solicitacoes_compra s on s.id = pi.pedido_id
-        where s.id=%s
+        join rubricas r on r.id = pi.rubrica_id
+        left join pedidos p on p.solicitacao_id = s.id
+        where coalesce(pi.pedido_manual_id, p.id, s.id)=%s
           and s.autorizado=true
           and s.status in ('em_andamento','cotado','aguardando_nota','finalizado')
         order by pi.created_at, pi.descricao
@@ -4126,6 +4150,25 @@ elif menu == "cotacoes":
 
         st.markdown("### Cotações")
         cotacoes_salvas_v2 = query("""
+        with grupo_solicitacoes as (
+          select distinct pi.pedido_id as solicitacao_id
+          from pedido_itens pi
+          join solicitacoes_compra s on s.id = pi.pedido_id
+          left join pedidos p on p.solicitacao_id = s.id
+          where coalesce(pi.pedido_manual_id, p.id, s.id)=%s
+        ),
+        cotacoes_grupo as (
+          select distinct c.id
+          from cotacoes c
+          where c.solicitacao_id in (select solicitacao_id from grupo_solicitacoes)
+          union
+          select distinct ci.cotacao_id
+          from cotacao_itens ci
+          join pedido_itens pi on pi.id = ci.pedido_item_id
+          join solicitacoes_compra s on s.id = pi.pedido_id
+          left join pedidos p on p.solicitacao_id = s.id
+          where coalesce(pi.pedido_manual_id, p.id, s.id)=%s
+        )
         select
           c.id,
           c.solicitacao_id,
@@ -4136,16 +4179,21 @@ elif menu == "cotacoes":
           c.prazo_entrega,
           c.arquivo_url,
           c.observacoes,
-          count(pi_ci.id) as total_itens,
-          coalesce(sum(ci.valor_total) filter (where pi_ci.id is not null), c.valor_total, 0) as valor_total
+          count(pi_ci.id) filter (where coalesce(pi_ci.pedido_manual_id, p_ci.id, s_ci.id)=%s) as total_itens,
+          coalesce(
+            sum(ci.valor_total) filter (where coalesce(pi_ci.pedido_manual_id, p_ci.id, s_ci.id)=%s),
+            c.valor_total,
+            0
+          ) as valor_total
         from cotacoes c
-        left join solicitacoes_compra s on s.id = c.solicitacao_id
+        join cotacoes_grupo cg on cg.id = c.id
         left join cotacao_itens ci on ci.cotacao_id = c.id
-        left join pedido_itens pi_ci on pi_ci.id = ci.pedido_item_id and pi_ci.pedido_id=%s
-        where c.solicitacao_id=%s
+        left join pedido_itens pi_ci on pi_ci.id = ci.pedido_item_id
+        left join solicitacoes_compra s_ci on s_ci.id = pi_ci.pedido_id
+        left join pedidos p_ci on p_ci.solicitacao_id = s_ci.id
         group by c.id, c.solicitacao_id, c.ordem, c.fornecedor, c.cnpj_cpf, c.telefone_email, c.prazo_entrega, c.arquivo_url, c.observacoes, c.valor_total
         order by c.ordem
-        """, (sid, sid))
+        """, (sid, sid, sid, sid))
 
         def cotacao_v2_itens(cotacao_id):
             return query("""
@@ -4161,8 +4209,10 @@ elif menu == "cotacoes":
               ci.observacoes
             from cotacao_itens ci
             join pedido_itens pi on pi.id = ci.pedido_item_id
+            join solicitacoes_compra s on s.id = pi.pedido_id
+            left join pedidos p on p.solicitacao_id = s.id
             where ci.cotacao_id=%s
-              and pi.pedido_id=%s
+              and coalesce(pi.pedido_manual_id, p.id, s.id)=%s
             order by ci.created_at, ci.id
             """, (cotacao_id, sid))
 
@@ -4461,8 +4511,8 @@ elif menu == "cotacoes":
                             continue
                         solicitacao_item_id = int(item.get("solicitacao_id"))
                         item_criado = query("""
-                        insert into pedido_itens (pedido_id, rubrica_id, descricao, tipo_item, quantidade, valor_unitario, status, observacoes)
-                        values (%s,%s,%s,%s,%s,%s,'em_cotacao',%s)
+                        insert into pedido_itens (pedido_id, rubrica_id, descricao, tipo_item, quantidade, valor_unitario, status, observacoes, pedido_manual_id)
+                        values (%s,%s,%s,%s,%s,%s,'em_cotacao',%s,%s)
                         returning id
                         """, (
                             solicitacao_item_id,
@@ -4472,6 +4522,7 @@ elif menu == "cotacoes":
                             Decimal(str(item["Quantidade"])),
                             Decimal(str(item["Valor unitario numerico"])),
                             str(item.get("Observacoes") or "").strip() or "Item criado diretamente na cotação.",
+                            int(sid),
                         ))
                         itens_editados.at[indice_item, "pedido_item_id"] = item_criado.iloc[0]["id"]
 
