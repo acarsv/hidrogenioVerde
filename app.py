@@ -2530,19 +2530,22 @@ def voltar_item_para_cotacao(pedido_item_id, usuario_id):
     sincronizar_orcamento()
 
 
-def voltar_compra_para_nota_fiscal(solicitacao_id, usuario_id):
+def voltar_compra_para_nota_fiscal(pedido_id, usuario_id):
     conn = get_conn()
     conn.autocommit = False
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
-            select id, descricao
-            from solicitacoes_compra
-            where id=%s
-            """, (int(solicitacao_id),))
-            solicitacao = cur.fetchone()
-            if not solicitacao:
-                raise ValueError("Solicitacao nao encontrada.")
+            select distinct s.id, s.descricao
+            from pedido_itens pi
+            join solicitacoes_compra s on s.id = pi.pedido_id
+            left join pedidos ped on ped.solicitacao_id = s.id
+            where coalesce(pi.pedido_manual_id, ped.id, s.id)=%s
+            order by s.id
+            """, (int(pedido_id),))
+            solicitacoes = cur.fetchall()
+            if not solicitacoes:
+                raise ValueError("Pedido nao encontrado.")
 
             cur.execute("""
             delete from patrimonio
@@ -2550,42 +2553,49 @@ def voltar_compra_para_nota_fiscal(solicitacao_id, usuario_id):
                 select nfi.id
                 from nota_fiscal_itens nfi
                 join pedido_itens pi on pi.id = nfi.pedido_item_id
-                where pi.pedido_id=%s
+                join solicitacoes_compra s on s.id = pi.pedido_id
+                left join pedidos ped on ped.solicitacao_id = s.id
+                where coalesce(pi.pedido_manual_id, ped.id, s.id)=%s
             )
-            """, (int(solicitacao_id),))
+            """, (int(pedido_id),))
             cur.execute("""
             delete from estoque_consumo
             where nota_fiscal_item_id in (
                 select nfi.id
                 from nota_fiscal_itens nfi
                 join pedido_itens pi on pi.id = nfi.pedido_item_id
-                where pi.pedido_id=%s
+                join solicitacoes_compra s on s.id = pi.pedido_id
+                left join pedidos ped on ped.solicitacao_id = s.id
+                where coalesce(pi.pedido_manual_id, ped.id, s.id)=%s
             )
-            """, (int(solicitacao_id),))
+            """, (int(pedido_id),))
             cur.execute("""
             delete from atesto_servico
             where nota_fiscal_item_id in (
                 select nfi.id
                 from nota_fiscal_itens nfi
                 join pedido_itens pi on pi.id = nfi.pedido_item_id
-                where pi.pedido_id=%s
+                join solicitacoes_compra s on s.id = pi.pedido_id
+                left join pedidos ped on ped.solicitacao_id = s.id
+                where coalesce(pi.pedido_manual_id, ped.id, s.id)=%s
             )
-            """, (int(solicitacao_id),))
+            """, (int(pedido_id),))
 
-            cur.execute("""
-            update solicitacoes_compra
-            set status='aguardando_nota',
-                atualizado_em=now()
-            where id=%s
-            """, (int(solicitacao_id),))
-            cur.execute("""
-            insert into historico_status (solicitacao_id,status_novo,usuario_id,observacao)
-            values (%s,'aguardando_nota',%s,%s)
-            """, (
-                int(solicitacao_id),
-                usuario_id,
-                f"Compra retornada do destino final para correcao de nota fiscal: {solicitacao['descricao']}",
-            ))
+            for solicitacao in solicitacoes:
+                cur.execute("""
+                update solicitacoes_compra
+                set status='aguardando_nota',
+                    atualizado_em=now()
+                where id=%s
+                """, (int(solicitacao["id"]),))
+                cur.execute("""
+                insert into historico_status (solicitacao_id,status_novo,usuario_id,observacao)
+                values (%s,'aguardando_nota',%s,%s)
+                """, (
+                    int(solicitacao["id"]),
+                    usuario_id,
+                    f"Pedido #{int(pedido_id)} retornado do destino final para correcao de nota fiscal: {solicitacao['descricao']}",
+                ))
         conn.commit()
     except Exception:
         conn.rollback()
@@ -2598,28 +2608,34 @@ def voltar_compra_para_nota_fiscal(solicitacao_id, usuario_id):
 
 @st.dialog("Voltar para nota fiscal")
 def voltar_compra_para_nota_fiscal_dialog(itens_destino, usuario_id):
-    solicitacoes = itens_destino[["solicitacao", "rubrica"]].drop_duplicates().copy()
-    if len(solicitacoes) == 0:
+    pedidos = itens_destino.groupby("pedido_id").agg(
+        rubricas=("rubrica", lambda valores: ", ".join(sorted({str(valor) for valor in valores if str(valor).strip()}))),
+        total_itens=("id", "count"),
+        valor_total=("valor_total", "sum"),
+    ).reset_index()
+    if len(pedidos) == 0:
         st.info("Nao ha compras com nota fiscal para retornar.")
         return
 
-    solicitacao_id = st.selectbox(
+    pedido_id = st.selectbox(
         "Compra",
-        solicitacoes["solicitacao"].tolist(),
+        pedidos["pedido_id"].tolist(),
         format_func=lambda valor: (
-            f"Solicitacao #{valor} - "
-            f"Rubrica {solicitacoes.loc[solicitacoes.solicitacao == valor, 'rubrica'].iloc[0]}"
+            f"Pedido #{int(valor)} - "
+            f"Rubrica {pedidos.loc[pedidos.pedido_id == valor, 'rubricas'].iloc[0]} - "
+            f"{int(pedidos.loc[pedidos.pedido_id == valor, 'total_itens'].iloc[0])} item(ns) - "
+            f"{format_currency_brl(pedidos.loc[pedidos.pedido_id == valor, 'valor_total'].iloc[0])}"
         ),
-        key="destino_voltar_solicitacao",
+        key="destino_voltar_pedido",
     )
-    st.warning("Os registros de patrimonio, estoque ou atesto desta compra serao removidos para retornar a etapa da nota fiscal.")
+    st.warning("Os registros de patrimonio, estoque ou atesto deste pedido serao removidos para retornar a etapa da nota fiscal.")
     if st.button("Voltar para nota fiscal", type="primary", use_container_width=True):
         try:
-            voltar_compra_para_nota_fiscal(int(solicitacao_id), usuario_id)
+            voltar_compra_para_nota_fiscal(int(pedido_id), usuario_id)
         except (ValueError, psycopg2.Error) as exc:
             st.error(str(exc))
         else:
-            st.success("Compra retornada para a etapa de nota fiscal.")
+            st.success("Pedido retornado para a etapa de nota fiscal.")
             st.rerun()
 
 def ajustar_valor_solicitado_para_nf(pedido_item_id, usuario_id):
@@ -6034,6 +6050,7 @@ elif menu == "destino_final":
     itens_destino = query("""
     select
       nfi.id,
+      coalesce(pi.pedido_manual_id, ped.id, s.id) as pedido_id,
       s.id as solicitacao,
       r.codigo as rubrica,
       nfi.descricao,
@@ -6053,6 +6070,7 @@ elif menu == "destino_final":
     join pedido_itens pi on pi.id = nfi.pedido_item_id
     join solicitacoes_compra s on s.id = pi.pedido_id
     join rubricas r on r.id = pi.rubrica_id
+    left join pedidos ped on ped.solicitacao_id = s.id
     left join patrimonio p on p.nota_fiscal_item_id = nfi.id
     left join estoque_consumo e on e.nota_fiscal_item_id = nfi.id
     left join atesto_servico a on a.nota_fiscal_item_id = nfi.id
