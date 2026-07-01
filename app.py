@@ -5679,101 +5679,106 @@ elif menu == "documentos":
                     key=f"documentos_compra_alvo_{pedido_doc_id}",
                 )
 
-        arquivo_documento = st.file_uploader(
-            "Arquivo",
+        arquivos_documento = st.file_uploader(
+            "Arquivos",
             type=["pdf", "png", "jpg", "jpeg", "doc", "docx", "xls", "xlsx", "csv"],
+            accept_multiple_files=True,
             key=f"documentos_upload_{pedido_doc_id}_{destino_documento}",
         )
         observacao_documento = st.text_area("Observacao", key=f"documentos_obs_{pedido_doc_id}_{destino_documento}")
         pasta_documento = st.text_input("Link da pasta no Google Drive (opcional)", key=f"documentos_pasta_{pedido_doc_id}_{destino_documento}")
-        if st.button("Adicionar documento", type="primary", use_container_width=True, key=f"documentos_adicionar_{pedido_doc_id}"):
-            if arquivo_documento is None:
-                st.error("Selecione um arquivo.")
+        if st.button("Adicionar documentos", type="primary", use_container_width=True, key=f"documentos_adicionar_{pedido_doc_id}"):
+            if not arquivos_documento:
+                st.error("Selecione pelo menos um arquivo.")
             elif destino_documento != "documento" and alvo_id is None:
                 st.error("Selecione o destino do documento.")
-            elif destino_documento == "cotacao":
-                cotacao = cotacoes_doc[cotacoes_doc["id"] == alvo_id].iloc[0]
-                upload = upload_cotacao_google_drive(
-                    arquivo_documento,
-                    int(cotacao["solicitacao_id"]),
-                    int(cotacao["ordem"]),
-                    rubrica_id=int(cotacao["rubrica_id"]) if cotacao["rubrica_id"] is not None and not pd.isna(cotacao["rubrica_id"]) else None,
-                    fornecedor=str(cotacao["fornecedor"] or ""),
-                    pasta_url=pasta_documento.strip() or None,
-                )
-                execute("""
-                insert into cotacao_arquivos (cotacao_id, google_drive_file_id, google_drive_link, nome_arquivo, mime_type, tamanho_bytes)
-                values (%s,%s,%s,%s,%s,%s)
-                """, (int(alvo_id), upload["file_id"], upload["file_link"], upload["nome_arquivo"], upload["mime_type"], upload["tamanho_bytes"]))
-                st.success("Documento de cotacao adicionado.")
-                st.rerun()
-            elif destino_documento == "nota_fiscal":
-                nota = notas_doc[notas_doc["id"] == alvo_id].iloc[0]
-                upload = upload_nota_fiscal_google_drive(
-                    arquivo_documento,
-                    str(nota["numero_nf"] or ""),
-                    str(nota["fornecedor"] or ""),
-                    pasta_url=pasta_documento.strip() or None,
-                )
-                execute("""
-                insert into nota_fiscal_arquivos (nota_fiscal_id, google_drive_file_id, google_drive_link, nome_arquivo, mime_type, tamanho_bytes)
-                values (%s,%s,%s,%s,%s,%s)
-                """, (int(alvo_id), upload["file_id"], upload["file_link"], upload["nome_arquivo"], upload["mime_type"], upload["tamanho_bytes"]))
-                st.success("Documento de nota fiscal adicionado.")
-                st.rerun()
-            elif destino_documento == "comprovante":
-                compra = compras_doc[compras_doc["id"] == alvo_id].iloc[0]
-                upload = upload_comprovante_bancario_google_drive(
-                    arquivo_documento,
-                    int(alvo_id),
-                    fornecedor=str(compra["fornecedor"] or ""),
-                    pasta_url=pasta_documento.strip() or None,
-                )
-                execute("""
-                insert into comprovantes_bancarios (
-                    compra_id, nota_fiscal_id, google_drive_file_id, google_drive_link,
-                    pasta_google_drive_link, nome_arquivo, mime_type, tamanho_bytes, observacao, enviado_por
-                ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                """, (
-                    int(alvo_id),
-                    None,
-                    upload["file_id"],
-                    upload["file_link"],
-                    upload["folder_link"],
-                    upload["nome_arquivo"],
-                    upload["mime_type"],
-                    upload["tamanho_bytes"],
-                    observacao_documento.strip() or None,
-                    user["id"],
-                ))
-                st.success("Comprovante adicionado.")
-                st.rerun()
             else:
-                upload = upload_documento_pedido_google_drive(
-                    arquivo_documento,
-                    int(pedido_doc_id),
-                    categoria="documento",
-                    pasta_url=pasta_documento.strip() or None,
-                )
-                execute("""
-                insert into pedido_documentos (
-                    pedido_id, solicitacao_id, categoria, google_drive_file_id, google_drive_link,
-                    pasta_google_drive_link, nome_arquivo, mime_type, tamanho_bytes, observacao, enviado_por
-                ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                """, (
-                    int(pedido_doc_id),
-                    solicitacao_ids[0] if solicitacao_ids else None,
-                    "documento",
-                    upload["file_id"],
-                    upload["file_link"],
-                    upload["folder_link"],
-                    upload["nome_arquivo"],
-                    upload["mime_type"],
-                    upload["tamanho_bytes"],
-                    observacao_documento.strip() or None,
-                    user["id"],
-                ))
-                st.success("Documento vinculado adicionado.")
+                total_enviados = 0
+                if destino_documento == "cotacao":
+                    cotacao = cotacoes_doc[cotacoes_doc["id"] == alvo_id].iloc[0]
+                    for arquivo_documento in arquivos_documento:
+                        upload = upload_cotacao_google_drive(
+                            arquivo_documento,
+                            int(cotacao["solicitacao_id"]),
+                            int(cotacao["ordem"]),
+                            rubrica_id=int(cotacao["rubrica_id"]) if cotacao["rubrica_id"] is not None and not pd.isna(cotacao["rubrica_id"]) else None,
+                            fornecedor=str(cotacao["fornecedor"] or ""),
+                            pasta_url=pasta_documento.strip() or None,
+                        )
+                        execute("""
+                        insert into cotacao_arquivos (cotacao_id, google_drive_file_id, google_drive_link, nome_arquivo, mime_type, tamanho_bytes)
+                        values (%s,%s,%s,%s,%s,%s)
+                        """, (int(alvo_id), upload["file_id"], upload["file_link"], upload["nome_arquivo"], upload["mime_type"], upload["tamanho_bytes"]))
+                        total_enviados += 1
+                elif destino_documento == "nota_fiscal":
+                    nota = notas_doc[notas_doc["id"] == alvo_id].iloc[0]
+                    for arquivo_documento in arquivos_documento:
+                        upload = upload_nota_fiscal_google_drive(
+                            arquivo_documento,
+                            str(nota["numero_nf"] or ""),
+                            str(nota["fornecedor"] or ""),
+                            pasta_url=pasta_documento.strip() or None,
+                        )
+                        execute("""
+                        insert into nota_fiscal_arquivos (nota_fiscal_id, google_drive_file_id, google_drive_link, nome_arquivo, mime_type, tamanho_bytes)
+                        values (%s,%s,%s,%s,%s,%s)
+                        """, (int(alvo_id), upload["file_id"], upload["file_link"], upload["nome_arquivo"], upload["mime_type"], upload["tamanho_bytes"]))
+                        total_enviados += 1
+                elif destino_documento == "comprovante":
+                    compra = compras_doc[compras_doc["id"] == alvo_id].iloc[0]
+                    for arquivo_documento in arquivos_documento:
+                        upload = upload_comprovante_bancario_google_drive(
+                            arquivo_documento,
+                            int(alvo_id),
+                            fornecedor=str(compra["fornecedor"] or ""),
+                            pasta_url=pasta_documento.strip() or None,
+                        )
+                        execute("""
+                        insert into comprovantes_bancarios (
+                            compra_id, nota_fiscal_id, google_drive_file_id, google_drive_link,
+                            pasta_google_drive_link, nome_arquivo, mime_type, tamanho_bytes, observacao, enviado_por
+                        ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        """, (
+                            int(alvo_id),
+                            None,
+                            upload["file_id"],
+                            upload["file_link"],
+                            upload["folder_link"],
+                            upload["nome_arquivo"],
+                            upload["mime_type"],
+                            upload["tamanho_bytes"],
+                            observacao_documento.strip() or None,
+                            user["id"],
+                        ))
+                        total_enviados += 1
+                else:
+                    for arquivo_documento in arquivos_documento:
+                        upload = upload_documento_pedido_google_drive(
+                            arquivo_documento,
+                            int(pedido_doc_id),
+                            categoria="documento",
+                            pasta_url=pasta_documento.strip() or None,
+                        )
+                        execute("""
+                        insert into pedido_documentos (
+                            pedido_id, solicitacao_id, categoria, google_drive_file_id, google_drive_link,
+                            pasta_google_drive_link, nome_arquivo, mime_type, tamanho_bytes, observacao, enviado_por
+                        ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        """, (
+                            int(pedido_doc_id),
+                            solicitacao_ids[0] if solicitacao_ids else None,
+                            "documento",
+                            upload["file_id"],
+                            upload["file_link"],
+                            upload["folder_link"],
+                            upload["nome_arquivo"],
+                            upload["mime_type"],
+                            upload["tamanho_bytes"],
+                            observacao_documento.strip() or None,
+                            user["id"],
+                        ))
+                        total_enviados += 1
+                st.success(f"{total_enviados} documento(s) adicionado(s).")
                 st.rerun()
 
     elif modo_documento == "Editar documento existente":
