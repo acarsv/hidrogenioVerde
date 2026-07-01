@@ -3210,6 +3210,7 @@ if menu == "orcamento":
         .agg(
             valor_orcado=("valor_orcado", "sum"),
             valor_utilizado=("valor_utilizado", "sum"),
+            valor_reservado=("valor_reservado", "sum"),
             saldo_disponivel=("saldo_disponivel", "sum"),
         )
     )
@@ -3222,14 +3223,27 @@ if menu == "orcamento":
     resumo_tipo_orcamento = (
         pd.DataFrame({"Categoria": ordem_categorias_orcamento[:3]})
         .merge(resumo_tipo_orcamento, on="Categoria", how="left")
-        .fillna({"valor_orcado": 0, "valor_utilizado": 0, "saldo_disponivel": 0})
+        .fillna({"valor_orcado": 0, "valor_utilizado": 0, "valor_reservado": 0, "saldo_disponivel": 0})
+    )
+    resumo_tipo_orcamento["valor_disponivel_real"] = (
+        resumo_tipo_orcamento["valor_orcado"]
+        - resumo_tipo_orcamento["valor_utilizado"]
+        - resumo_tipo_orcamento["valor_reservado"]
     )
     resumo_tipo_exibicao = resumo_tipo_orcamento.rename(columns={
         "valor_orcado": "Valor orçado",
         "valor_utilizado": "Valor usado",
         "saldo_disponivel": "Valor disponível",
+        "valor_disponivel_real": "Valor disponível real",
     })
-    for coluna in ["Valor orçado", "Valor usado", "Valor disponível"]:
+    resumo_tipo_exibicao = resumo_tipo_exibicao[[
+        "Categoria",
+        "Valor orçado",
+        "Valor usado",
+        "Valor disponível",
+        "Valor disponível real",
+    ]]
+    for coluna in ["Valor orçado", "Valor usado", "Valor disponível", "Valor disponível real"]:
         resumo_tipo_exibicao[coluna] = resumo_tipo_exibicao[coluna].apply(format_currency_brl)
     st.markdown("### Resumo por tipo de despesa")
     st.dataframe(resumo_tipo_exibicao, use_container_width=True, hide_index=True)
