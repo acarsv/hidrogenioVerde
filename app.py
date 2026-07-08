@@ -5446,9 +5446,21 @@ elif menu == "compra_nota":
                 st.error("Anexe o arquivo da NF ou informe o local/link no Google Drive.")
             elif fornecedor_nf.strip().lower() != str(itens_nf_df["fornecedor"].iloc[0]).strip().lower():
                 st.error("O fornecedor da NF deve ser o mesmo fornecedor vencedor dos itens selecionados.")
-            elif Decimal(str(valor_nf)) != Decimal(str(valor_nf_padrao)):
-                st.error("O valor da NF deve bater com a soma dos itens selecionados.")
             else:
+                itens_nf_editor_gravacao = itens_nf_editor.copy()
+                valor_nf_decimal = Decimal(str(valor_nf)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                valor_nf_padrao_decimal = Decimal(str(valor_nf_padrao)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                if valor_nf_decimal != valor_nf_padrao_decimal:
+                    if len(itens_nf_editor_gravacao) == 1:
+                        quantidade_nf = Decimal(str(itens_nf_editor_gravacao.iloc[0]["Quantidade"]))
+                        if quantidade_nf <= 0:
+                            st.error("A quantidade do item da NF deve ser maior que zero.")
+                            st.stop()
+                        valor_unitario_nf = (valor_nf_decimal / quantidade_nf).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        itens_nf_editor_gravacao.loc[itens_nf_editor_gravacao.index[0], "Valor unitario NF"] = float(valor_unitario_nf)
+                    else:
+                        st.error("Para NF com mais de um item, ajuste os valores unitarios dos itens ate a soma bater com o valor da NF.")
+                        st.stop()
                 upload_nf_resultado = None
                 local_nf_final = local_nf.strip()
                 if arquivo_nf is not None:
@@ -5507,7 +5519,7 @@ elif menu == "compra_nota":
                         upload_nf_resultado["tamanho_bytes"],
                     ))
                 itens_nf_gravacao = itens_nf_df.merge(
-                    itens_nf_editor[["pedido_item_id", "Valor unitario NF"]],
+                    itens_nf_editor_gravacao[["pedido_item_id", "Valor unitario NF"]],
                     on="pedido_item_id",
                     how="left",
                 )
