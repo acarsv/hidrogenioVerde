@@ -2742,6 +2742,69 @@ def ajustar_valor_solicitado_para_nf(pedido_item_id, usuario_id):
     sincronizar_orcamento()
 
 
+def sincronizar_valor_estimado_com_nf(pedido_item_ids=None):
+    filtro_itens = ""
+    params = []
+    if pedido_item_ids:
+        filtro_itens = "where pi.id = any(%s::uuid[])"
+        params.append([str(item_id) for item_id in pedido_item_ids])
+
+    execute(f"""
+    update pedido_itens pi
+    set valor_unitario = round(
+        coalesce(nullif(totais.valor_nf_item, 0), nullif(totais.valor_cotado_vencedor, 0), pi.valor_total)
+        / nullif(pi.quantidade, 0),
+        2
+    )
+    from (
+        select
+          pi.id as pedido_item_id,
+          coalesce(sum(nfi.valor_total), 0) as valor_nf_item,
+          coalesce((
+              select sum(ci.valor_total)
+              from cotacao_itens ci
+              where ci.pedido_item_id = pi.id
+                and ci.vencedor = true
+          ), 0) as valor_cotado_vencedor
+        from pedido_itens pi
+        left join nota_fiscal_itens nfi on nfi.pedido_item_id = pi.id
+        {filtro_itens}
+        group by pi.id
+    ) totais
+    where pi.id = totais.pedido_item_id
+      and pi.quantidade > 0
+    """, tuple(params))
+
+    filtro_solicitacoes = ""
+    params_solicitacoes = []
+    if pedido_item_ids:
+        filtro_solicitacoes = """
+        where pedido_id in (
+            select distinct pedido_id
+            from pedido_itens
+            where id = any(%s::uuid[])
+        )
+        """
+        params_solicitacoes.append([str(item_id) for item_id in pedido_item_ids])
+
+    execute(f"""
+    update solicitacoes_compra s
+    set valor_estimado = totais.valor_total,
+        quantidade = totais.quantidade_total,
+        atualizado_em = now()
+    from (
+        select
+          pedido_id,
+          coalesce(sum(valor_total), 0) as valor_total,
+          coalesce(sum(quantidade), 0) as quantidade_total
+        from pedido_itens
+        {filtro_solicitacoes}
+        group by pedido_id
+    ) totais
+    where s.id = totais.pedido_id
+    """, tuple(params_solicitacoes))
+
+
 @st.dialog("Editar nota fiscal")
 def editar_numero_arquivo_nf_dialog(rubrica_id, solicitacao_id=None):
     filtro_solicitacao = ""
@@ -5461,6 +5524,7 @@ elif menu == "compra_nota":
                         Decimal(str(item_nf["quantidade"])),
                         Decimal(str(item_nf["Valor unitario NF"])),
                     ))
+                sincronizar_valor_estimado_com_nf(itens_nf_gravacao["pedido_item_id"].dropna().tolist())
                 st.success("Nota fiscal salva. Finalize a compra somente depois de conferir a nota.")
                 sincronizar_orcamento()
 
@@ -5484,6 +5548,7 @@ elif menu == "compra_nota":
                 """, (itens_vencedores["pedido_item_id"].tolist(),))
                 for solicitacao_finalizada_id in solicitacoes_finalizadas["pedido_id"].dropna().tolist():
                     execute("update solicitacoes_compra set status='finalizado' where id=%s", (int(solicitacao_finalizada_id),))
+                sincronizar_valor_estimado_com_nf(itens_vencedores["pedido_item_id"].dropna().tolist())
                 sincronizar_orcamento()
                 st.success("Compra e nota fiscal finalizadas.")
                 st.rerun()
@@ -7057,6 +7122,7 @@ elif menu == "itens_comprados":
                         pedido_item_id = linha_original["_pedido_item_id"]
                         if linha["Ação"] == "Deletar":
                             execute("delete from nota_fiscal_itens where id=%s", (item_nf_id,))
+                            sincronizar_valor_estimado_com_nf([pedido_item_id])
                             recalcular_totais_nota_compra(nota_fiscal_id, compra_id)
                             remover_nota_vazia(nota_fiscal_id)
                             total_deletadas += 1
@@ -7093,6 +7159,7 @@ elif menu == "itens_comprados":
                                 data_emissao=%s
                             where id=%s
                             """, (numero_nf, fornecedor_nf, data_emissao, nota_fiscal_id))
+                            sincronizar_valor_estimado_com_nf([pedido_item_id])
                             recalcular_totais_nota_compra(nota_fiscal_id, compra_id)
                             total_salvas += 1
                     except Exception as exc:
