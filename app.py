@@ -3534,7 +3534,12 @@ if menu == "orcamento":
 elif menu == "nova_exigencia":
     sincronizar_orcamento()
     rubricas = query("""
-    select v.id, v.codigo || ' - ' || v.nome as label, v.saldo_disponivel, r.tipo
+    select
+      v.id,
+      v.codigo || ' - ' || v.nome as label,
+      v.saldo_disponivel,
+      v.saldo_disponivel + v.reserva_tecnica as saldo_sem_reserva_tecnica,
+      r.tipo
     from vw_orcamento v
     join rubricas r on r.id = v.id
     where v.encerrada = false
@@ -3551,10 +3556,18 @@ elif menu == "nova_exigencia":
         "material_permanente": "permanente",
         "servico_pf": "servico",
     }.get(tipo_rubrica, "permanente")
-    saldo_atual = Decimal(str(rubricas.loc[rubricas["label"] == rubrica_label, "saldo_disponivel"].iloc[0]))
-    st.markdown(
+    rubrica_selecionada = rubricas.loc[rubricas["label"] == rubrica_label].iloc[0]
+    saldo_atual = Decimal(str(rubrica_selecionada["saldo_disponivel"]))
+    saldo_sem_reserva_tecnica = Decimal(str(rubrica_selecionada["saldo_sem_reserva_tecnica"]))
+    col_saldo_operacional, col_saldo_sem_reserva = st.columns(2)
+    col_saldo_operacional.markdown(
         f"<span style='color:#8a8d98;font-size:0.95rem;'>Disponível operacional: "
         f"<strong>{format_currency_brl_markdown(saldo_atual)}</strong></span>",
+        unsafe_allow_html=True,
+    )
+    col_saldo_sem_reserva.markdown(
+        f"<span style='color:#8a8d98;font-size:0.95rem;'>Disponível operacional sem reserva técnica: "
+        f"<strong>{format_currency_brl_markdown(saldo_sem_reserva_tecnica)}</strong></span>",
         unsafe_allow_html=True,
     )
     if "nova_exigencia_form_version" not in st.session_state:
