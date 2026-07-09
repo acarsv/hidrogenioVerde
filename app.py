@@ -3594,12 +3594,32 @@ elif menu == "nova_exigencia":
 
     col_novo, col_atualizar = st.columns(2)
     if col_novo.button("Criar novo pedido", type="primary", use_container_width=True):
-        pedido_criado = query("""
+        pedido_rascunho_vazio = query("""
+        select p.id
+        from pedidos p
+        where p.rubrica_id=%s
+          and p.status='rascunho'
+          and (p.solicitante_id=%s or %s in ('admin','gerente'))
+          and not exists (
+              select 1
+              from pedido_rascunho_itens i
+              where i.pedido_id = p.id
+          )
+        order by p.id asc
+        limit 1
+        """, (rubrica_id, user["id"], user["papel"]))
+        if len(pedido_rascunho_vazio):
+            st.session_state["nova_exigencia_pedido_id"] = int(pedido_rascunho_vazio.iloc[0]["id"])
+            st.session_state["nova_exigencia_sucesso"] = (
+                f"Pedido #{int(pedido_rascunho_vazio.iloc[0]['id'])} reutilizado. Adicione os itens para finalizar."
+            )
+        else:
+            pedido_criado = query("""
         insert into pedidos (rubrica_id, solicitante_id, status)
         values (%s,%s,'rascunho')
         returning id
-        """, (rubrica_id, user["id"]))
-        st.session_state["nova_exigencia_pedido_id"] = int(pedido_criado.iloc[0]["id"])
+            """, (rubrica_id, user["id"]))
+            st.session_state["nova_exigencia_pedido_id"] = int(pedido_criado.iloc[0]["id"])
         st.rerun()
     if col_atualizar.button("Atualizar pedidos", use_container_width=True):
         st.rerun()
