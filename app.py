@@ -2761,8 +2761,20 @@ def sincronizar_valor_estimado_com_nf(pedido_item_ids=None):
           pi.id as pedido_item_id,
           coalesce(sum(nfi.valor_total), 0) as valor_nf_item,
           coalesce((
-              select sum(ci.valor_total)
+              select sum(
+                  case
+                    when totais_cotacao.total_itens = 1 and coalesce(c.valor_total, 0) > 0
+                      then c.valor_total
+                    else ci.valor_total
+                  end
+              )
               from cotacao_itens ci
+              join cotacoes c on c.id = ci.cotacao_id
+              join (
+                  select cotacao_id, count(*) as total_itens
+                  from cotacao_itens
+                  group by cotacao_id
+              ) totais_cotacao on totais_cotacao.cotacao_id = ci.cotacao_id
               where ci.pedido_item_id = pi.id
                 and ci.vencedor = true
           ), 0) as valor_cotado_vencedor
@@ -5011,25 +5023,50 @@ elif menu == "compra_nota":
         st.success("Compra cancelada e solicitação removida dos registros ativos.")
         st.rerun()
     cotacoes_itens_df = query("""
+    with itens_cotacao as (
+      select
+        ci.id,
+        ci.pedido_item_id,
+        ci.cotacao_id,
+        c.ordem,
+        c.fornecedor,
+        coalesce(ci.descricao_item, pi.descricao) as item,
+        coalesce(ci.tipo_item, pi.tipo_item) as tipo_item,
+        ci.quantidade,
+        ci.valor_unitario,
+        ci.valor_total,
+        c.valor_total as valor_total_cotacao,
+        count(*) over (partition by c.id) as total_itens_cotacao,
+        ci.vencedor
+      from cotacao_itens ci
+      join cotacoes c on c.id = ci.cotacao_id
+      join pedido_itens pi on pi.id = ci.pedido_item_id
+      join solicitacoes_compra s on s.id = pi.pedido_id
+      left join pedidos p on p.solicitacao_id = s.id
+      where coalesce(pi.pedido_manual_id, p.id, s.id)=%s
+    )
     select
-      ci.id,
-      ci.pedido_item_id,
-      ci.cotacao_id,
-      c.ordem,
-      c.fornecedor,
-      coalesce(ci.descricao_item, pi.descricao) as item,
-      coalesce(ci.tipo_item, pi.tipo_item) as tipo_item,
-      ci.quantidade,
-      ci.valor_unitario,
-      ci.valor_total as "Valor total",
-      ci.vencedor
-    from cotacao_itens ci
-    join cotacoes c on c.id = ci.cotacao_id
-    join pedido_itens pi on pi.id = ci.pedido_item_id
-    join solicitacoes_compra s on s.id = pi.pedido_id
-    left join pedidos p on p.solicitacao_id = s.id
-    where coalesce(pi.pedido_manual_id, p.id, s.id)=%s
-    order by pi.descricao, c.ordem
+      id,
+      pedido_item_id,
+      cotacao_id,
+      ordem,
+      fornecedor,
+      item,
+      tipo_item,
+      quantidade,
+      case
+        when total_itens_cotacao = 1 and coalesce(valor_total_cotacao, 0) > 0
+          then round(valor_total_cotacao / nullif(quantidade, 0), 2)
+        else valor_unitario
+      end as valor_unitario,
+      case
+        when total_itens_cotacao = 1 and coalesce(valor_total_cotacao, 0) > 0
+          then valor_total_cotacao
+        else valor_total
+      end as "Valor total",
+      vencedor
+    from itens_cotacao
+    order by item, ordem
     """, (pedido_compra_id,))
     if len(cotacoes_itens_df) == 0:
         st.warning("Não há itens cotados para essa rubrica.")
@@ -5205,6 +5242,7 @@ elif menu == "compra_nota":
                 """, (pedido_item_ids,))
                 for solicitacao_compra_id in solicitacoes_compra_vencedora["pedido_id"].dropna().tolist():
                     execute("update solicitacoes_compra set status='aguardando_nota' where id=%s", (int(solicitacao_compra_id),))
+                sincronizar_valor_estimado_com_nf(pedido_item_ids)
             sincronizar_orcamento()
             st.success("Compra registrada pela cotação vencedora. Orçamento atualizado e status: aguardando nota.")
 
@@ -5408,22 +5446,43 @@ elif menu == "compra_nota":
             exibir_comprovantes_bancarios(compra_id)
 
         itens_vencedores = query("""
+        with itens_cotacao as (
+          select
+            ci.pedido_item_id,
+            coalesce(ci.descricao_item, pi.descricao) as descricao,
+            coalesce(ci.tipo_item, pi.tipo_item) as tipo_item,
+            ci.quantidade,
+            ci.valor_unitario,
+            ci.valor_total,
+            c.valor_total as valor_total_cotacao,
+            count(*) over (partition by c.id) as total_itens_cotacao,
+            c.fornecedor
+          from cotacao_itens ci
+          join cotacoes c on c.id = ci.cotacao_id
+          join pedido_itens pi on pi.id = ci.pedido_item_id
+          join solicitacoes_compra s on s.id = pi.pedido_id
+          left join pedidos p on p.solicitacao_id = s.id
+          where coalesce(pi.pedido_manual_id, p.id, s.id)=%s
+            and ci.vencedor=true
+        )
         select
-          ci.pedido_item_id,
-          coalesce(ci.descricao_item, pi.descricao) as descricao,
-          coalesce(ci.tipo_item, pi.tipo_item) as tipo_item,
-          ci.quantidade,
-          ci.valor_unitario,
-          ci.valor_total,
-          c.fornecedor
-        from cotacao_itens ci
-        join cotacoes c on c.id = ci.cotacao_id
-        join pedido_itens pi on pi.id = ci.pedido_item_id
-        join solicitacoes_compra s on s.id = pi.pedido_id
-        left join pedidos p on p.solicitacao_id = s.id
-        where coalesce(pi.pedido_manual_id, p.id, s.id)=%s
-          and ci.vencedor=true
-        order by c.fornecedor, pi.descricao
+          pedido_item_id,
+          descricao,
+          tipo_item,
+          quantidade,
+          case
+            when total_itens_cotacao = 1 and coalesce(valor_total_cotacao, 0) > 0
+              then round(valor_total_cotacao / nullif(quantidade, 0), 2)
+            else valor_unitario
+          end as valor_unitario,
+          case
+            when total_itens_cotacao = 1 and coalesce(valor_total_cotacao, 0) > 0
+              then valor_total_cotacao
+            else valor_total
+          end as valor_total,
+          fornecedor
+        from itens_cotacao
+        order by fornecedor, descricao
         """, (pedido_compra_id,))
         itens_lancados = query("""
         select pedido_item_id
