@@ -3594,30 +3594,46 @@ elif menu == "nova_exigencia":
 
     col_novo, col_atualizar = st.columns(2)
     if col_novo.button("Criar novo pedido", type="primary", use_container_width=True):
-        pedido_rascunho_vazio = query("""
+        pedido_recuperavel = query("""
         select p.id
         from pedidos p
-        where p.rubrica_id=%s
-          and p.status='rascunho'
+        where p.status in ('rascunho', 'cancelado')
+          and p.solicitacao_id is null
           and (p.solicitante_id=%s or %s in ('admin','gerente'))
           and not exists (
               select 1
               from pedido_rascunho_itens i
               where i.pedido_id = p.id
           )
+          and not exists (
+              select 1
+              from pedido_itens pi
+              where pi.pedido_manual_id = p.id
+          )
         order by p.id asc
         limit 1
-        """, (rubrica_id, user["id"], user["papel"]))
-        if len(pedido_rascunho_vazio):
-            st.session_state["nova_exigencia_pedido_id"] = int(pedido_rascunho_vazio.iloc[0]["id"])
+        """, (user["id"], user["papel"]))
+        if len(pedido_recuperavel):
+            pedido_recuperado_id = int(pedido_recuperavel.iloc[0]["id"])
+            execute("""
+            update pedidos
+            set rubrica_id=%s,
+                solicitante_id=%s,
+                descricao=null,
+                justificativa=null,
+                status='rascunho',
+                atualizado_em=now()
+            where id=%s
+            """, (rubrica_id, user["id"], pedido_recuperado_id))
+            st.session_state["nova_exigencia_pedido_id"] = pedido_recuperado_id
             st.session_state["nova_exigencia_sucesso"] = (
-                f"Pedido #{int(pedido_rascunho_vazio.iloc[0]['id'])} reutilizado. Adicione os itens para finalizar."
+                f"Pedido #{pedido_recuperado_id} recuperado. Adicione os itens para finalizar."
             )
         else:
             pedido_criado = query("""
-        insert into pedidos (rubrica_id, solicitante_id, status)
-        values (%s,%s,'rascunho')
-        returning id
+            insert into pedidos (rubrica_id, solicitante_id, status)
+            values (%s,%s,'rascunho')
+            returning id
             """, (rubrica_id, user["id"]))
             st.session_state["nova_exigencia_pedido_id"] = int(pedido_criado.iloc[0]["id"])
         st.rerun()
@@ -6299,7 +6315,7 @@ elif menu == "pedidos_finalizados":
       '-' as solicitacoes,
       r.codigo || ' - ' || r.nome as rubricas,
       'Sem itens cadastrados' as pedido,
-      'rascunho' as status,
+      p.status,
       '-' as empresa,
       false as autorizado,
       0 as total_itens,
@@ -6307,10 +6323,14 @@ elif menu == "pedidos_finalizados":
       0 as total_itens_com_nf,
       0::numeric as valor,
       p.criado_em,
-      'Adicionar itens' as pendencia
+      case
+        when p.status = 'cancelado' then 'Recuperar pedido'
+        else 'Adicionar itens'
+      end as pendencia
     from pedidos p
     join rubricas r on r.id = p.rubrica_id
-    where p.status = 'rascunho'
+    where p.status in ('rascunho', 'cancelado')
+      and p.solicitacao_id is null
       and not exists (
         select 1
         from pedido_rascunho_itens pri
