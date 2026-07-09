@@ -3595,15 +3595,41 @@ elif menu == "nova_exigencia":
     col_novo, col_atualizar = st.columns(2)
     if col_novo.button("Criar novo pedido", type="primary", use_container_width=True):
         pedido_recuperavel = query("""
-        select p.id
-        from pedidos p
-        where p.status in ('rascunho', 'cancelado')
-          and p.solicitacao_id is null
-          and (p.solicitante_id=%s or %s in ('admin','gerente'))
-          and not exists (
+        select
+          p.id,
+          exists (
               select 1
               from pedido_rascunho_itens i
               where i.pedido_id = p.id
+          ) as tem_itens_rascunho
+        from pedidos p
+        left join solicitacoes_compra s on s.id = p.solicitacao_id
+        where (p.solicitante_id=%s or %s in ('admin','gerente'))
+          and (
+              (
+                  p.status in ('rascunho', 'cancelado')
+                  and p.solicitacao_id is null
+                  and not exists (
+                      select 1
+                      from pedido_rascunho_itens i
+                      where i.pedido_id = p.id
+                  )
+              )
+              or (
+                  p.status = 'cancelado'
+                  and p.rubrica_id = %s
+                  and s.status = 'cancelado'
+                  and not exists (
+                      select 1
+                      from compras c
+                      where c.solicitacao_id = s.id
+                  )
+                  and not exists (
+                      select 1
+                      from notas_fiscais nf
+                      where nf.solicitacao_id = s.id
+                  )
+              )
           )
           and not exists (
               select 1
@@ -3612,19 +3638,30 @@ elif menu == "nova_exigencia":
           )
         order by p.id asc
         limit 1
-        """, (user["id"], user["papel"]))
+        """, (user["id"], user["papel"], rubrica_id))
         if len(pedido_recuperavel):
             pedido_recuperado_id = int(pedido_recuperavel.iloc[0]["id"])
-            execute("""
-            update pedidos
-            set rubrica_id=%s,
-                solicitante_id=%s,
-                descricao=null,
-                justificativa=null,
-                status='rascunho',
-                atualizado_em=now()
-            where id=%s
-            """, (rubrica_id, user["id"], pedido_recuperado_id))
+            tem_itens_rascunho = bool(pedido_recuperavel.iloc[0]["tem_itens_rascunho"])
+            if tem_itens_rascunho:
+                execute("""
+                update pedidos
+                set solicitante_id=%s,
+                    solicitacao_id=null,
+                    status='rascunho',
+                    atualizado_em=now()
+                where id=%s
+                """, (user["id"], pedido_recuperado_id))
+            else:
+                execute("""
+                update pedidos
+                set rubrica_id=%s,
+                    solicitante_id=%s,
+                    descricao=null,
+                    justificativa=null,
+                    status='rascunho',
+                    atualizado_em=now()
+                where id=%s
+                """, (rubrica_id, user["id"], pedido_recuperado_id))
             st.session_state["nova_exigencia_pedido_id"] = pedido_recuperado_id
             st.session_state["nova_exigencia_sucesso"] = (
                 f"Pedido #{pedido_recuperado_id} recuperado. Adicione os itens para finalizar."
@@ -6345,6 +6382,48 @@ elif menu == "pedidos_finalizados":
     """)
     if len(pedidos_rascunho_vazios):
         pedidos_pendentes = pd.concat([pedidos_rascunho_vazios, pedidos_pendentes], ignore_index=True)
+    pedidos_cancelados_recuperaveis = query("""
+    select
+      p.id as pedido_id,
+      array[p.solicitacao_id]::bigint[] as solicitacao_ids,
+      '#' || p.solicitacao_id::text as solicitacoes,
+      r.codigo || ' - ' || r.nome as rubricas,
+      coalesce(nullif(string_agg(distinct pri.descricao::text, '; '::text), ''), 'Sem itens cadastrados') as pedido,
+      p.status,
+      '-' as empresa,
+      false as autorizado,
+      count(distinct pri.id) as total_itens,
+      0 as total_itens_vencedores,
+      0 as total_itens_com_nf,
+      coalesce(sum(pri.valor_total), 0) as valor,
+      p.criado_em,
+      'Recuperar pedido' as pendencia
+    from pedidos p
+    join solicitacoes_compra s on s.id = p.solicitacao_id
+    join rubricas r on r.id = p.rubrica_id
+    left join pedido_rascunho_itens pri on pri.pedido_id = p.id
+    where p.status = 'cancelado'
+      and s.status = 'cancelado'
+      and not exists (
+          select 1
+          from compras c
+          where c.solicitacao_id = s.id
+      )
+      and not exists (
+          select 1
+          from notas_fiscais nf
+          where nf.solicitacao_id = s.id
+      )
+      and not exists (
+          select 1
+          from pedido_itens pi
+          where pi.pedido_manual_id = p.id
+      )
+    group by p.id, p.solicitacao_id, r.codigo, r.nome, p.status, p.criado_em
+    order by p.id asc
+    """)
+    if len(pedidos_cancelados_recuperaveis):
+        pedidos_pendentes = pd.concat([pedidos_cancelados_recuperaveis, pedidos_pendentes], ignore_index=True)
     if len(pedidos_pendentes) == 0:
         st.info("Nenhum pedido pendente encontrado.")
     else:
