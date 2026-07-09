@@ -6272,6 +6272,39 @@ elif menu == "pedidos_finalizados":
     from pedido_resumo
     order by criado_em desc nulls last, pedido_id desc
     """)
+    pedidos_rascunho_vazios = query("""
+    select
+      p.id as pedido_id,
+      array[]::bigint[] as solicitacao_ids,
+      '-' as solicitacoes,
+      r.codigo || ' - ' || r.nome as rubricas,
+      'Sem itens cadastrados' as pedido,
+      'rascunho' as status,
+      '-' as empresa,
+      false as autorizado,
+      0 as total_itens,
+      0 as total_itens_vencedores,
+      0 as total_itens_com_nf,
+      0::numeric as valor,
+      p.criado_em,
+      'Adicionar itens' as pendencia
+    from pedidos p
+    join rubricas r on r.id = p.rubrica_id
+    where p.status = 'rascunho'
+      and not exists (
+        select 1
+        from pedido_rascunho_itens pri
+        where pri.pedido_id = p.id
+      )
+      and not exists (
+        select 1
+        from pedido_itens pi
+        where pi.pedido_manual_id = p.id
+      )
+    order by p.criado_em desc nulls last, p.id desc
+    """)
+    if len(pedidos_rascunho_vazios):
+        pedidos_pendentes = pd.concat([pedidos_rascunho_vazios, pedidos_pendentes], ignore_index=True)
     if len(pedidos_pendentes) == 0:
         st.info("Nenhum pedido pendente encontrado.")
     else:
