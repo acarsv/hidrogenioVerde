@@ -6210,6 +6210,98 @@ elif menu == "documentos":
                 st.rerun()
 
 elif menu == "pedidos_finalizados":
+    st.markdown("### Pedidos não finalizados")
+    pedidos_pendentes = query("""
+    with item_base as (
+      select
+        coalesce(pi.pedido_manual_id, p.id, s.id) as pedido_id,
+        s.id as solicitacao_id,
+        r.codigo as rubrica,
+        r.nome as rubrica_nome,
+        pi.descricao,
+        pi.valor_total,
+        pi.id as pedido_item_id,
+        s.status,
+        s.autorizado,
+        coalesce(c.fornecedor, '-') as fornecedor_vencedor,
+        coalesce(p.criado_em, s.criado_em) as criado_em
+      from pedido_itens pi
+      join solicitacoes_compra s on s.id = pi.pedido_id
+      join rubricas r on r.id = pi.rubrica_id
+      left join pedidos p on p.solicitacao_id = s.id
+      left join cotacao_itens ci on ci.pedido_item_id = pi.id and ci.vencedor = true
+      left join cotacoes c on c.id = ci.cotacao_id
+      where s.status not in ('finalizado', 'cancelado')
+    ),
+    nota_resumo as (
+      select
+        nfi.pedido_item_id,
+        count(distinct nfi.nota_fiscal_id) as total_notas
+      from nota_fiscal_itens nfi
+      group by nfi.pedido_item_id
+    ),
+    pedido_resumo as (
+      select
+        ib.pedido_id,
+        array_agg(distinct ib.solicitacao_id order by ib.solicitacao_id) as solicitacao_ids,
+        string_agg(distinct ('#' || ib.solicitacao_id::text)::text, ', '::text) as solicitacoes,
+        string_agg(distinct (ib.rubrica::text || ' - ' || ib.rubrica_nome::text)::text, '; '::text) as rubricas,
+        string_agg(distinct ib.descricao::text, '; '::text) as pedido,
+        string_agg(distinct ib.status::text, ', '::text) as status,
+        string_agg(distinct ib.fornecedor_vencedor::text, '; '::text) filter (where ib.fornecedor_vencedor <> '-') as empresa,
+        bool_or(ib.autorizado) as autorizado,
+        count(distinct ib.pedido_item_id) as total_itens,
+        count(distinct ib.pedido_item_id) filter (where ib.fornecedor_vencedor <> '-') as total_itens_vencedores,
+        count(distinct ib.pedido_item_id) filter (where coalesce(nr.total_notas, 0) > 0) as total_itens_com_nf,
+        coalesce(sum(ib.valor_total), 0) as valor,
+        max(ib.criado_em) as criado_em
+      from item_base ib
+      left join nota_resumo nr on nr.pedido_item_id = ib.pedido_item_id
+      group by ib.pedido_id
+    )
+    select
+      *,
+      case
+        when not autorizado then 'Aguardando autorização'
+        when status like '%solicitacao%' or status like '%em_andamento%' then 'Enviar para cotação'
+        when total_itens_vencedores < total_itens then 'Escolher cotação vencedora'
+        when status like '%cotado%' then 'Registrar compra'
+        when total_itens_com_nf < total_itens then 'Lançar nota fiscal'
+        else 'Conferir e finalizar'
+      end as pendencia
+    from pedido_resumo
+    order by criado_em desc nulls last, pedido_id desc
+    """)
+    if len(pedidos_pendentes) == 0:
+        st.info("Nenhum pedido pendente encontrado.")
+    else:
+        pendentes_exibicao = pedidos_pendentes.copy()
+        pendentes_exibicao["Pedido"] = pendentes_exibicao["pedido_id"].apply(lambda valor: f"#{int(valor)}")
+        pendentes_exibicao["Solicitações"] = pendentes_exibicao["solicitacoes"]
+        pendentes_exibicao["Rubricas"] = pendentes_exibicao["rubricas"]
+        pendentes_exibicao["Resumo"] = pendentes_exibicao["pedido"]
+        pendentes_exibicao["Empresa"] = pendentes_exibicao["empresa"].fillna("-")
+        pendentes_exibicao["Valor estimado"] = pendentes_exibicao["valor"].apply(format_currency_brl)
+        pendentes_exibicao["Status"] = pendentes_exibicao["status"].apply(normalizar_texto_portugues)
+        pendentes_exibicao["Pendência"] = pendentes_exibicao["pendencia"]
+        pendentes_exibicao["Itens"] = pendentes_exibicao["total_itens"].fillna(0).astype(int)
+        pendentes_exibicao["Itens com NF"] = pendentes_exibicao["total_itens_com_nf"].fillna(0).astype(int)
+        pendentes_exibicao["Criado em"] = pd.to_datetime(pendentes_exibicao["criado_em"]).dt.strftime("%d/%m/%Y %H:%M")
+        pendentes_exibicao = pendentes_exibicao[[
+            "Pedido",
+            "Solicitações",
+            "Rubricas",
+            "Resumo",
+            "Empresa",
+            "Valor estimado",
+            "Status",
+            "Pendência",
+            "Itens",
+            "Itens com NF",
+            "Criado em",
+        ]]
+        st.dataframe(pendentes_exibicao, use_container_width=True, hide_index=True)
+
     st.markdown("### Pedidos finalizados")
     pedidos_finalizados = query("""
     with item_base as (
