@@ -6263,9 +6263,9 @@ elif menu == "pedidos_finalizados":
       *,
       case
         when not autorizado then 'Aguardando autorização'
-        when status like '%solicitacao%' or status like '%em_andamento%' then 'Enviar para cotação'
+        when status like '%%solicitacao%%' or status like '%%em_andamento%%' then 'Enviar para cotação'
         when total_itens_vencedores < total_itens then 'Escolher cotação vencedora'
-        when status like '%cotado%' then 'Registrar compra'
+        when status like '%%cotado%%' then 'Registrar compra'
         when total_itens_com_nf < total_itens then 'Lançar nota fiscal'
         else 'Conferir e finalizar'
       end as pendencia
