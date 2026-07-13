@@ -1840,6 +1840,12 @@ def texto_dados_adicionais_fornecedor(rubrica, tipos_itens=None) -> list[tuple[s
         ("HIDROGENIO VERDE EM FORNOS DE BAIXA E ALTA TEMPERATURA", False),
     ]
 
+def construir_texto_dados_adicionais_fornecedor(rubrica, tipos_itens=None) -> str:
+    return "\n".join(
+        texto
+        for texto, _ in texto_dados_adicionais_fornecedor(rubrica, tipos_itens)
+    ).strip()
+
 def construir_pdf_dados_adicionais_fornecedor(rubrica, tipos_itens=None) -> bytes:
     largura = 595
     altura = 842
@@ -5170,6 +5176,22 @@ elif menu == "compra_nota":
             mime="application/pdf",
             key=f"pdf_dados_adicionais_fornecedor_{rubrica_compra_id}_{cotacao_vencedora_id}",
         )
+        texto_cotacao_key = f"texto_dados_adicionais_fornecedor_{rubrica_compra_id}_{cotacao_vencedora_id}"
+        if st.button(
+            "Gerar texto para cotacao",
+            key=f"botao_texto_dados_adicionais_fornecedor_{rubrica_compra_id}_{cotacao_vencedora_id}",
+        ):
+            st.session_state[texto_cotacao_key] = construir_texto_dados_adicionais_fornecedor(
+                rubrica_pdf,
+                itens_cotacao_selecionada["tipo_item"].dropna().tolist() if len(itens_cotacao_selecionada) else [],
+            )
+        if st.session_state.get(texto_cotacao_key):
+            st.text_area(
+                "Texto para colocar na cotacao",
+                value=st.session_state[texto_cotacao_key],
+                height=340,
+                key=f"campo_texto_dados_adicionais_fornecedor_{rubrica_compra_id}_{cotacao_vencedora_id}",
+            )
 
     if st.button("Registrar compra"):
         if len(itens_cotacao_selecionada) == 0:
