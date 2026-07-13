@@ -1,6 +1,7 @@
 .env
 client_secret.json
 token_drive_output.txt
+gerar_token_drive.py
 .venv
 __pycache__
 streamlit.err.log
