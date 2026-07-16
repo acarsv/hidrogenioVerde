@@ -2821,6 +2821,44 @@ def sincronizar_valor_estimado_com_nf(pedido_item_ids=None):
     """, tuple(params_solicitacoes))
 
 
+def sincronizar_status_com_nf_completa():
+    finalizadas = query("""
+    with itens_vencedores as (
+      select
+        pi.pedido_id as solicitacao_id,
+        ci.pedido_item_id
+      from cotacao_itens ci
+      join pedido_itens pi on pi.id = ci.pedido_item_id
+      where ci.vencedor = true
+    ),
+    solicitacoes_prontas as (
+      select s.id
+      from solicitacoes_compra s
+      join compras c on c.solicitacao_id = s.id
+      join itens_vencedores iv on iv.solicitacao_id = s.id
+      left join nota_fiscal_itens nfi on nfi.pedido_item_id = iv.pedido_item_id
+      where s.status = 'aguardando_nota'
+      group by s.id
+      having count(distinct iv.pedido_item_id) > 0
+         and count(distinct iv.pedido_item_id) = count(distinct nfi.pedido_item_id)
+    )
+    update solicitacoes_compra s
+    set status='finalizado',
+        atualizado_em=now()
+    from solicitacoes_prontas sp
+    where s.id = sp.id
+    returning s.id
+    """)
+    if len(finalizadas):
+        solicitacao_ids = [int(valor) for valor in finalizadas["id"].dropna().tolist()]
+        execute("""
+        update pedidos
+        set status='finalizado',
+            atualizado_em=now()
+        where solicitacao_id = any(%s::bigint[])
+        """, (solicitacao_ids,))
+
+
 def atualizar_valores_itens_cotacao(cotacao_id, itens_editados):
     if len(itens_editados) == 0:
         raise ValueError("Nao ha itens para atualizar.")
@@ -5066,6 +5104,7 @@ elif menu == "cotacoes":
 
 elif menu == "compra_nota":
     exibir_resumo_valores_extra_nao_debitados()
+    sincronizar_status_com_nf_completa()
     pedidos_compra = query("""
     with item_base as (
       select
