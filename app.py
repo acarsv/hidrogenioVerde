@@ -5718,6 +5718,25 @@ elif menu == "compra_nota":
                 itens_nf_editor_gravacao = itens_nf_editor.copy()
                 valor_nf_decimal = Decimal(str(valor_nf)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                 valor_nf_padrao_decimal = Decimal(str(valor_nf_padrao)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                def ajustar_ultimo_item_nf(total_alvo):
+                    diferenca_total = (total_alvo - valor_nf_padrao_decimal).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    if len(itens_nf_editor_gravacao) == 0:
+                        st.error("Selecione pelo menos um item para ajustar a nota fiscal.")
+                        st.stop()
+                    indice_ultimo = itens_nf_editor_gravacao.index[-1]
+                    quantidade_ultimo = Decimal(str(itens_nf_editor_gravacao.loc[indice_ultimo, "Quantidade"]))
+                    valor_unitario_ultimo = Decimal(str(itens_nf_editor_gravacao.loc[indice_ultimo, "Valor unitario NF"]))
+                    if quantidade_ultimo <= 0:
+                        st.error("A quantidade do item da NF deve ser maior que zero.")
+                        st.stop()
+                    valor_total_ultimo = (quantidade_ultimo * valor_unitario_ultimo).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    novo_total_ultimo = (valor_total_ultimo + diferenca_total).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    if novo_total_ultimo < 0:
+                        st.error("O valor total da NF nao pode ser menor que a soma dos demais itens.")
+                        st.stop()
+                    novo_valor_unitario = (novo_total_ultimo / quantidade_ultimo).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    itens_nf_editor_gravacao.loc[indice_ultimo, "Valor unitario NF"] = float(novo_valor_unitario)
+
                 nota_existente = query("""
                 select
                   nf.id,
@@ -5748,35 +5767,14 @@ elif menu == "compra_nota":
                         valor_nf_final = max(valor_nf_existente, valor_itens_lancados + valor_nf_padrao_decimal)
                     elif valor_restante_nf == valor_nf_padrao_decimal:
                         valor_nf_final = valor_nf_decimal
-                    elif len(itens_nf_editor_gravacao) == 1:
-                        quantidade_nf = Decimal(str(itens_nf_editor_gravacao.iloc[0]["Quantidade"]))
-                        if quantidade_nf <= 0:
-                            st.error("A quantidade do item da NF deve ser maior que zero.")
-                            st.stop()
-                        valor_unitario_nf = (valor_restante_nf / quantidade_nf).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                        if valor_unitario_nf < 0:
-                            st.error("O valor total da NF nao pode ser menor que os itens ja lancados para essa NF.")
-                            st.stop()
-                        itens_nf_editor_gravacao.loc[itens_nf_editor_gravacao.index[0], "Valor unitario NF"] = float(valor_unitario_nf)
+                    elif valor_restante_nf >= 0:
+                        ajustar_ultimo_item_nf(valor_restante_nf)
                         valor_nf_final = valor_nf_decimal
                     else:
-                        st.error(
-                            "Esta NF ja possui itens lancados. Informe o valor dos itens pendentes "
-                            f"({format_currency_brl(valor_nf_padrao_decimal)}) ou o valor total da NF "
-                            f"({format_currency_brl(valor_itens_lancados + valor_nf_padrao_decimal)})."
-                        )
+                        st.error("O valor total da NF nao pode ser menor que os itens ja lancados para essa NF.")
                         st.stop()
                 elif valor_nf_decimal != valor_nf_padrao_decimal:
-                    if len(itens_nf_editor_gravacao) == 1:
-                        quantidade_nf = Decimal(str(itens_nf_editor_gravacao.iloc[0]["Quantidade"]))
-                        if quantidade_nf <= 0:
-                            st.error("A quantidade do item da NF deve ser maior que zero.")
-                            st.stop()
-                        valor_unitario_nf = (valor_nf_decimal / quantidade_nf).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                        itens_nf_editor_gravacao.loc[itens_nf_editor_gravacao.index[0], "Valor unitario NF"] = float(valor_unitario_nf)
-                    else:
-                        st.error("Para NF com mais de um item, ajuste os valores unitarios dos itens ate a soma bater com o valor da NF.")
-                        st.stop()
+                    ajustar_ultimo_item_nf(valor_nf_decimal)
                 upload_nf_resultado = None
                 local_nf_final = local_nf.strip()
                 if arquivo_nf is not None:
@@ -5831,6 +5829,13 @@ elif menu == "compra_nota":
                     on="pedido_item_id",
                     how="left",
                 )
+                pedido_item_ids_gravacao = itens_nf_gravacao["pedido_item_id"].dropna().tolist()
+                if pedido_item_ids_gravacao:
+                    execute("""
+                    delete from nota_fiscal_itens
+                    where nota_fiscal_id=%s
+                      and pedido_item_id = any(%s::uuid[])
+                    """, (nota_id, pedido_item_ids_gravacao))
                 for _, item_nf in itens_nf_gravacao.iterrows():
                     execute("""
                     insert into nota_fiscal_itens
@@ -5844,7 +5849,14 @@ elif menu == "compra_nota":
                         Decimal(str(item_nf["quantidade"])),
                         Decimal(str(item_nf["Valor unitario NF"])),
                     ))
-                sincronizar_valor_estimado_com_nf(itens_nf_gravacao["pedido_item_id"].dropna().tolist())
+                total_itens_nf_atual = query("""
+                select coalesce(sum(valor_total), 0) as valor_total
+                from nota_fiscal_itens
+                where nota_fiscal_id=%s
+                """, (nota_id,))
+                if len(total_itens_nf_atual):
+                    execute("update notas_fiscais set valor_nf=%s where id=%s", (Decimal(str(total_itens_nf_atual.iloc[0]["valor_total"])), nota_id))
+                sincronizar_valor_estimado_com_nf(pedido_item_ids_gravacao)
                 st.success("Nota fiscal salva. Finalize a compra somente depois de conferir a nota.")
                 sincronizar_orcamento()
 
