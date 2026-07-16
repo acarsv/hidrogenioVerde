@@ -2821,8 +2821,8 @@ def sincronizar_valor_estimado_com_nf(pedido_item_ids=None):
     """, tuple(params_solicitacoes))
 
 
-def sincronizar_status_com_nf_completa():
-    finalizadas = query("""
+def sincronizar_status_operacional():
+    execute("""
     with itens_vencedores as (
       select
         pi.pedido_id as solicitacao_id,
@@ -2831,32 +2831,51 @@ def sincronizar_status_com_nf_completa():
       join pedido_itens pi on pi.id = ci.pedido_item_id
       where ci.vencedor = true
     ),
-    solicitacoes_prontas as (
-      select s.id
+    resumo as (
+      select
+        s.id as solicitacao_id,
+        count(distinct iv.pedido_item_id) as total_vencedores,
+        count(distinct nfi.pedido_item_id) as total_itens_nf,
+        bool_or(c.id is not null) as tem_compra,
+        bool_or(iv.pedido_item_id is not null) as tem_vencedor
       from solicitacoes_compra s
-      join compras c on c.solicitacao_id = s.id
-      join itens_vencedores iv on iv.solicitacao_id = s.id
+      left join compras c on c.solicitacao_id = s.id
+      left join itens_vencedores iv on iv.solicitacao_id = s.id
       left join nota_fiscal_itens nfi on nfi.pedido_item_id = iv.pedido_item_id
-      where s.status = 'aguardando_nota'
+      where s.status <> 'cancelado'
       group by s.id
-      having count(distinct iv.pedido_item_id) > 0
-         and count(distinct iv.pedido_item_id) = count(distinct nfi.pedido_item_id)
+    ),
+    status_calculado as (
+      select
+        s.id as solicitacao_id,
+        case
+          when s.status = 'finalizado' then s.status::text
+          when s.status = 'solicitacao' or s.autorizado = false then s.status::text
+          when r.total_vencedores > 0 and r.total_vencedores = r.total_itens_nf then 'finalizado'
+          when r.tem_compra then 'aguardando_nota'
+          when r.tem_vencedor then 'cotado'
+          else s.status::text
+        end as status_calculado
+      from solicitacoes_compra s
+      join resumo r on r.solicitacao_id = s.id
+      where s.status <> 'cancelado'
     )
     update solicitacoes_compra s
-    set status='finalizado',
-        atualizado_em=now()
-    from solicitacoes_prontas sp
-    where s.id = sp.id
-    returning s.id
+    set status = sc.status_calculado::status_compra,
+        atualizado_em = case when s.status::text <> sc.status_calculado then now() else s.atualizado_em end
+    from status_calculado sc
+    where s.id = sc.solicitacao_id
+      and s.status::text <> sc.status_calculado
     """)
-    if len(finalizadas):
-        solicitacao_ids = [int(valor) for valor in finalizadas["id"].dropna().tolist()]
-        execute("""
-        update pedidos
-        set status='finalizado',
-            atualizado_em=now()
-        where solicitacao_id = any(%s::bigint[])
-        """, (solicitacao_ids,))
+    execute("""
+    update pedidos p
+    set status = s.status::text,
+        atualizado_em = case when p.status is distinct from s.status::text then now() else p.atualizado_em end
+    from solicitacoes_compra s
+    where s.id = p.solicitacao_id
+      and s.status <> 'cancelado'
+      and p.status is distinct from s.status::text
+    """)
 
 
 def atualizar_valores_itens_cotacao(cotacao_id, itens_editados):
@@ -4256,6 +4275,7 @@ elif menu == "solicitacoes":
                 st.rerun()
 
 elif menu == "cotacoes":
+    sincronizar_status_operacional()
     if "cotacoes_visao" not in st.session_state:
         st.session_state["cotacoes_visao"] = "Cadastrar/editar cotacoes"
     opcoes_visao_cotacoes = ["Cadastrar/editar cotacoes", "Compras com cotacoes"]
@@ -5104,7 +5124,7 @@ elif menu == "cotacoes":
 
 elif menu == "compra_nota":
     exibir_resumo_valores_extra_nao_debitados()
-    sincronizar_status_com_nf_completa()
+    sincronizar_status_operacional()
     pedidos_compra = query("""
     with item_base as (
       select
@@ -6172,6 +6192,7 @@ elif menu == "comprovantes_bancarios":
                 st.rerun()
 
 elif menu == "documentos":
+    sincronizar_status_operacional()
     st.markdown("### Documentos")
     pedidos_documentos = query("""
     with item_base as (
@@ -6567,6 +6588,7 @@ elif menu == "documentos":
                 st.rerun()
 
 elif menu == "pedidos_finalizados":
+    sincronizar_status_operacional()
     st.markdown("### Pedidos não finalizados")
     pedidos_pendentes = query("""
     with item_base as (
@@ -6851,6 +6873,7 @@ elif menu == "pedidos_finalizados":
         st.rerun()
 
 elif menu == "destino_final":
+    sincronizar_status_operacional()
     itens_destino = query("""
     select
       nfi.id,
@@ -7000,6 +7023,7 @@ elif menu == "destino_final":
                         st.rerun()
 
 elif menu == "auditoria":
+    sincronizar_status_operacional()
     st.caption("Raio X da prestação de contas: pedido, autorização, cotação, nota fiscal, destino final e saldo da rubrica.")
     if st.button("Executar auditoria do projeto", type="primary"):
         st.session_state["auditoria_executada"] = True
