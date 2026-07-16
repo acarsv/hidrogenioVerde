@@ -2049,7 +2049,7 @@ def remanejar_saldo_dialog(usuario_id):
     order by codigo
     """)
     if len(rubricas) < 2:
-        st.info("Sao necessarias pelo menos duas rubricas ativas para remanejamento.")
+        st.info("São necessárias pelo menos duas rubricas ativas para remanejamento.")
         return
 
     def label_rubrica(item_id):
@@ -2069,9 +2069,9 @@ def remanejar_saldo_dialog(usuario_id):
     valor_maximo = float(max(disponivel_total_origem, Decimal("0.01")))
     valor = st.number_input("Valor total a remanejar", min_value=0.01, max_value=valor_maximo, value=0.01, step=100.0)
     st.caption(
-        f"Disponivel operacional: {format_currency_brl(saldo_origem)} | "
-        f"Reserva tecnica disponivel: {format_currency_brl(reserva_origem)} | "
-        f"Total disponivel para remanejamento: {format_currency_brl(disponivel_total_origem)}."
+        f"Disponível operacional: {format_currency_brl(saldo_origem)} | "
+        f"Reserva técnica disponível: {format_currency_brl(reserva_origem)} | "
+        f"Total disponível para remanejamento: {format_currency_brl(disponivel_total_origem)}."
     )
     justificativa = st.text_area("Justificativa formal")
 
@@ -2081,7 +2081,7 @@ def remanejar_saldo_dialog(usuario_id):
         if origem_id == destino_id:
             st.error("A rubrica de origem deve ser diferente da rubrica de destino.")
         elif valor_decimal > disponivel_total_origem:
-            st.error("O valor informado supera o total disponivel da rubrica de origem.")
+            st.error("O valor informado supera o total disponível da rubrica de origem.")
         elif not justificativa.strip():
             st.error("Informe uma justificativa para auditoria.")
         else:
@@ -2099,7 +2099,7 @@ def remanejar_saldo_dialog(usuario_id):
                 valor_orcado_movimentado = valor_decimal
             justificativa_auditoria = (
                 f"{justificativa.strip()} | Valor total informado: {format_currency_brl(valor_decimal)}. "
-                f"Valor orcado movimentado com reserva tecnica: {format_currency_brl(valor_orcado_movimentado)}."
+                f"Valor orçado movimentado com reserva técnica: {format_currency_brl(valor_orcado_movimentado)}."
             )
             execute("update rubricas set valor_orcado = valor_orcado - %s where id = %s", (valor_orcado_movimentado, int(origem_id)))
             execute("update rubricas set valor_orcado = valor_orcado + %s where id = %s", (valor_orcado_movimentado, int(destino_id)))
@@ -2389,7 +2389,7 @@ def historico_orcamento_dialog():
     limit 200
     """)
     if len(historico) == 0:
-        st.info("Ainda nao ha movimentacoes orcamentarias registradas.")
+        st.info("Ainda não há movimentações orçamentárias registradas.")
         return
     historico["Valor"] = historico["Valor"].apply(format_currency_brl)
     historico["Data"] = pd.to_datetime(historico["Data"], errors="coerce").dt.strftime("%d/%m/%Y %H:%M").fillna("")
@@ -2399,28 +2399,28 @@ def historico_orcamento_dialog():
 def exibir_detalhe_rubrica(rubrica):
     detalhes = pd.DataFrame(
         [
-            ("Codigo", rubrica["codigo"]),
+            ("Código", rubrica["codigo"]),
             ("Rubrica", rubrica["nome"]),
             ("Tipo", rubrica["tipo"]),
-            ("Responsavel", rubrica.get("responsaveis") or "-"),
-            ("Valor orcado", format_currency_brl(rubrica["valor_orcado"])),
+            ("Responsável", rubrica.get("responsaveis") or "-"),
+            ("Valor orçado", format_currency_brl(rubrica["valor_orcado"])),
             ("Valor reservado", format_currency_brl(rubrica["valor_reservado"])),
             ("Valor utilizado", format_currency_brl(rubrica["valor_utilizado"])),
-            ("Reserva tecnica", format_currency_brl(rubrica["reserva_tecnica"])),
-            ("Reserva tecnica (%)", format_percent_brl(rubrica["reserva_tecnica_percentual"])),
-            ("Minimo operacional", format_currency_brl(rubrica["valor_minimo_operacional"])),
-            ("Disponivel operacional", format_currency_brl(rubrica["saldo_disponivel"])),
+            ("Reserva técnica", format_currency_brl(rubrica["reserva_tecnica"])),
+            ("Reserva técnica (%)", format_percent_brl(rubrica["reserva_tecnica_percentual"])),
+            ("Mínimo operacional", format_currency_brl(rubrica["valor_minimo_operacional"])),
+            ("Disponível operacional", format_currency_brl(rubrica["saldo_disponivel"])),
             ("Saldo residual", format_currency_brl(rubrica["saldo_residual"])),
-            ("Indice comprometido", format_percent_brl(rubrica["percentual_comprometido"])),
+            ("Índice comprometido", format_percent_brl(rubrica["percentual_comprometido"])),
             ("Percentual utilizado", format_percent_brl(rubrica["percentual_utilizado"])),
             ("Status financeiro", rubrica["status_financeiro"]),
             ("Risco", rubrica["risco"]),
-            ("Encerrada", "Sim" if bool(rubrica["encerrada"]) else "Nao"),
+            ("Encerrada", "Sim" if bool(rubrica["encerrada"]) else "Não"),
         ],
         columns=["Campo", "Valor"],
     )
     with st.container(border=True):
-        st.markdown(f"### Analise da rubrica: {rubrica['codigo']}")
+        st.markdown(f"### Análise da rubrica: {rubrica['codigo']}")
         st.dataframe(
             detalhes,
             use_container_width=True,
@@ -3661,7 +3661,7 @@ if menu == "orcamento":
             )
             execute(
                 "insert into movimentacoes_orcamento (rubrica_id, usuario_id, operacao, valor, justificativa) values (%s,%s,'parametros_governanca',0,%s)",
-                (int(rubrica_id), user["id"], "Atualizacao de valor minimo operacional e reserva tecnica."),
+                (int(rubrica_id), user["id"], "Atualização de valor mínimo operacional e reserva técnica."),
             )
             st.success("Parâmetros atualizados.")
             st.rerun()
