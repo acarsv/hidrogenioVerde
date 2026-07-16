@@ -5373,6 +5373,7 @@ elif menu == "compra_nota":
                 """, (pedido_item_ids,))
                 for solicitacao_compra_id in solicitacoes_compra_vencedora["pedido_id"].dropna().tolist():
                     execute("update solicitacoes_compra set status='aguardando_nota' where id=%s", (int(solicitacao_compra_id),))
+                    execute("update pedidos set status='aguardando_nota', atualizado_em=now() where solicitacao_id=%s", (int(solicitacao_compra_id),))
                 sincronizar_valor_estimado_com_nf(pedido_item_ids)
             sincronizar_orcamento()
             st.success("Compra registrada pela cotação vencedora. Orçamento atualizado e status: aguardando nota.")
@@ -5867,6 +5868,7 @@ elif menu == "compra_nota":
                 sincronizar_valor_estimado_com_nf(pedido_item_ids_gravacao)
                 st.success("Nota fiscal salva. Finalize a compra somente depois de conferir a nota.")
                 sincronizar_orcamento()
+                st.rerun()
 
         st.markdown("### Finalizar")
         if st.button("Finalizar compra e nota fiscal", type="primary", key=f"finalizar_nf_{sid}_{compra_id}"):
