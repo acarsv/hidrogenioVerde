@@ -5718,7 +5718,55 @@ elif menu == "compra_nota":
                 itens_nf_editor_gravacao = itens_nf_editor.copy()
                 valor_nf_decimal = Decimal(str(valor_nf)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                 valor_nf_padrao_decimal = Decimal(str(valor_nf_padrao)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                if valor_nf_decimal != valor_nf_padrao_decimal:
+                nota_existente = query("""
+                select
+                  nf.id,
+                  nf.valor_nf,
+                  coalesce(sum(nfi.valor_total), 0) as valor_itens_lancados
+                from notas_fiscais nf
+                left join nota_fiscal_itens nfi on nfi.nota_fiscal_id = nf.id
+                where lower(trim(nf.numero_nf)) = lower(trim(%s))
+                  and lower(trim(nf.fornecedor)) = lower(trim(%s))
+                group by nf.id, nf.valor_nf
+                limit 1
+                """, (numero_nf, fornecedor_nf))
+                nota_existente_id = int(nota_existente.iloc[0]["id"]) if len(nota_existente) else None
+                valor_nf_final = valor_nf_decimal
+                valor_itens_lancados = (
+                    Decimal(str(nota_existente.iloc[0]["valor_itens_lancados"])).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    if len(nota_existente)
+                    else Decimal("0.00")
+                )
+                valor_nf_existente = (
+                    Decimal(str(nota_existente.iloc[0]["valor_nf"])).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    if len(nota_existente)
+                    else Decimal("0.00")
+                )
+                if len(nota_existente):
+                    valor_restante_nf = (valor_nf_decimal - valor_itens_lancados).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    if valor_nf_decimal == valor_nf_padrao_decimal:
+                        valor_nf_final = max(valor_nf_existente, valor_itens_lancados + valor_nf_padrao_decimal)
+                    elif valor_restante_nf == valor_nf_padrao_decimal:
+                        valor_nf_final = valor_nf_decimal
+                    elif len(itens_nf_editor_gravacao) == 1:
+                        quantidade_nf = Decimal(str(itens_nf_editor_gravacao.iloc[0]["Quantidade"]))
+                        if quantidade_nf <= 0:
+                            st.error("A quantidade do item da NF deve ser maior que zero.")
+                            st.stop()
+                        valor_unitario_nf = (valor_restante_nf / quantidade_nf).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        if valor_unitario_nf < 0:
+                            st.error("O valor total da NF nao pode ser menor que os itens ja lancados para essa NF.")
+                            st.stop()
+                        itens_nf_editor_gravacao.loc[itens_nf_editor_gravacao.index[0], "Valor unitario NF"] = float(valor_unitario_nf)
+                        valor_nf_final = valor_nf_decimal
+                    else:
+                        st.error(
+                            "Esta NF ja possui itens lancados. Informe o valor dos itens pendentes "
+                            f"({format_currency_brl(valor_nf_padrao_decimal)}) ou o valor total da NF "
+                            f"({format_currency_brl(valor_itens_lancados + valor_nf_padrao_decimal)})."
+                        )
+                        st.stop()
+                elif valor_nf_decimal != valor_nf_padrao_decimal:
                     if len(itens_nf_editor_gravacao) == 1:
                         quantidade_nf = Decimal(str(itens_nf_editor_gravacao.iloc[0]["Quantidade"]))
                         if quantidade_nf <= 0:
@@ -5743,16 +5791,8 @@ elif menu == "compra_nota":
                     except RuntimeError as exc:
                         st.error(str(exc))
                         st.stop()
-                nota_existente = query("""
-                select id, valor_nf
-                from notas_fiscais
-                where lower(trim(numero_nf)) = lower(trim(%s))
-                  and lower(trim(fornecedor)) = lower(trim(%s))
-                limit 1
-                """, (numero_nf, fornecedor_nf))
-                if len(nota_existente):
-                    nota_id = int(nota_existente.iloc[0]["id"])
-                    valor_nf_atualizado = Decimal(str(nota_existente.iloc[0]["valor_nf"])) + Decimal(str(valor_nf))
+                if nota_existente_id is not None:
+                    nota_id = nota_existente_id
                     execute("""
                     update notas_fiscais
                     set valor_nf=%s,
@@ -5760,13 +5800,13 @@ elif menu == "compra_nota":
                         data_emissao=coalesce(data_emissao, %s),
                         lancado_por=coalesce(lancado_por, %s)
                     where id=%s
-                    """, (valor_nf_atualizado, local_nf_final, data_nf, user["id"], nota_id))
+                    """, (valor_nf_final, local_nf_final, data_nf, user["id"], nota_id))
                 else:
                     nota_criada = query("""
                     insert into notas_fiscais (compra_id, solicitacao_id, numero_nf, fornecedor, valor_nf, data_emissao, arquivo_url, lancado_por)
                     values (%s,%s,%s,%s,%s,%s,%s,%s)
                     returning id
-                    """, (compra_id, sid, numero_nf, fornecedor_nf, valor_nf, data_nf, local_nf_final, user["id"]))
+                    """, (compra_id, sid, numero_nf, fornecedor_nf, valor_nf_final, data_nf, local_nf_final, user["id"]))
                     nota_id = int(nota_criada.iloc[0]["id"])
                 if upload_nf_resultado:
                     execute("""
