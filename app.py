@@ -3396,7 +3396,7 @@ if menu == "orcamento":
     total_utilizado = df.valor_utilizado.sum()
     total_reserva_tecnica = df.reserva_tecnica.sum()
     diferenca_sem_reserva_tecnica = total_orcado - total_reservado - total_utilizado
-    total_disponivel = df.saldo_disponivel.sum()
+    total_disponivel = pd.to_numeric(df.saldo_disponivel, errors="coerce").fillna(0).clip(lower=0).sum()
     total_compras_periodo = df.valor_compras_periodo.sum()
     percentual_compras_global = round((float(total_compras_periodo) * 100.0 / float(total_orcado)), 2) if float(total_orcado or 0) > 0 else 0
     eficiencia_compras = round((percentual_compras_global * 100.0 / percentual_tempo_prestacao), 2) if percentual_tempo_prestacao > 0 else 0
@@ -3443,11 +3443,16 @@ if menu == "orcamento":
         .merge(resumo_tipo_orcamento, on="Categoria", how="left")
         .fillna({"valor_orcado": 0, "valor_utilizado": 0, "valor_reservado": 0, "saldo_disponivel": 0})
     )
+    resumo_tipo_orcamento["saldo_disponivel"] = (
+        pd.to_numeric(resumo_tipo_orcamento["saldo_disponivel"], errors="coerce")
+        .fillna(0)
+        .clip(lower=0)
+    )
     resumo_tipo_orcamento["valor_disponivel_real"] = (
         resumo_tipo_orcamento["valor_orcado"]
         - resumo_tipo_orcamento["valor_utilizado"]
         - resumo_tipo_orcamento["valor_reservado"]
-    )
+    ).clip(lower=0)
     resumo_tipo_exibicao = resumo_tipo_orcamento.rename(columns={
         "valor_orcado": "Valor orçado",
         "valor_utilizado": "Valor usado",
@@ -3537,6 +3542,11 @@ if menu == "orcamento":
         pd.to_numeric(df_orcamento["Valor orçado"], errors="coerce").fillna(0)
         - pd.to_numeric(df_orcamento["Valor utilizado"], errors="coerce").fillna(0)
         - pd.to_numeric(df_orcamento["Valor reservado"], errors="coerce").fillna(0)
+    ).clip(lower=0)
+    df_orcamento["Disponível operacional"] = (
+        pd.to_numeric(df_orcamento["Disponível operacional"], errors="coerce")
+        .fillna(0)
+        .clip(lower=0)
     )
     for coluna in [
         "Valor orçado",
