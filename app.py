@@ -3509,10 +3509,11 @@ if menu == "orcamento":
     if len(alertas):
         with st.expander("Alertas financeiros", expanded=True):
             for _, rubrica in alertas.iterrows():
+                saldo_operacional_alerta = max(Decimal(str(rubrica["saldo_disponivel"] or 0)), Decimal("0"))
                 st.write(
                     f"{rubrica['codigo']} - {rubrica['nome']}: "
                     f"{descrever_status_financeiro(rubrica['status_financeiro'])} "
-                    f"({format_currency_brl_markdown(rubrica['saldo_disponivel'])} operacional)"
+                    f"({format_currency_brl_markdown(saldo_operacional_alerta)} operacional)"
                 )
 
     df_orcamento = df.rename(columns={
