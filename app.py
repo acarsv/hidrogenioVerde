@@ -4432,7 +4432,12 @@ elif menu == "cotacoes":
       join rubricas r on r.id = pi.rubrica_id
       left join pedidos p on p.solicitacao_id = s.id
       where s.autorizado=true
-        and s.status in ('em_andamento','cotado','aguardando_nota','finalizado')
+        and s.status in ('em_andamento','cotado')
+        and not exists (
+            select 1
+            from compras c
+            where c.solicitacao_id = s.id
+        )
     )
     select
       id,
@@ -4498,7 +4503,12 @@ elif menu == "cotacoes":
         left join pedidos p on p.solicitacao_id = s.id
         where coalesce(pi.pedido_manual_id, p.id, s.id)=%s
           and s.autorizado=true
-          and s.status in ('em_andamento','cotado','aguardando_nota','finalizado')
+          and s.status in ('em_andamento','cotado')
+          and not exists (
+              select 1
+              from compras c
+              where c.solicitacao_id = s.id
+          )
         order by pi.created_at, pi.descricao
         """, (sid,))
         if len(pedido_itens) == 0:
@@ -5878,6 +5888,7 @@ elif menu == "compra_nota":
                 """, (itens_vencedores["pedido_item_id"].tolist(),))
                 for solicitacao_finalizada_id in solicitacoes_finalizadas["pedido_id"].dropna().tolist():
                     execute("update solicitacoes_compra set status='finalizado' where id=%s", (int(solicitacao_finalizada_id),))
+                    execute("update pedidos set status='finalizado', atualizado_em=now() where solicitacao_id=%s", (int(solicitacao_finalizada_id),))
                 sincronizar_valor_estimado_com_nf(itens_vencedores["pedido_item_id"].dropna().tolist())
                 sincronizar_orcamento()
                 st.success("Compra e nota fiscal finalizadas.")
