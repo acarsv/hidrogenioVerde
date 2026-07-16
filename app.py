@@ -2823,6 +2823,88 @@ def sincronizar_valor_estimado_com_nf(pedido_item_ids=None):
     """, tuple(params_solicitacoes))
 
 
+def atualizar_valores_itens_cotacao(cotacao_id, itens_editados):
+    if len(itens_editados) == 0:
+        raise ValueError("Nao ha itens para atualizar.")
+
+    ids_itens = [int(valor) for valor in itens_editados["id"].dropna().tolist()]
+    if not ids_itens:
+        raise ValueError("Nao ha itens validos para atualizar.")
+
+    valores_por_item = {}
+    for _, item in itens_editados.iterrows():
+        item_id = int(item["id"])
+        valor_unitario = Decimal(str(item["Valor unitario"])).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if valor_unitario < 0:
+            raise ValueError("Valor unitario nao pode ser negativo.")
+        valores_por_item[item_id] = valor_unitario
+
+    conn = get_conn()
+    conn.autocommit = False
+    pedido_item_ids = []
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+            select id, pedido_item_id
+            from cotacao_itens
+            where cotacao_id=%s and id = any(%s)
+            """, (int(cotacao_id), ids_itens))
+            itens_banco = cur.fetchall()
+            ids_banco = {int(row["id"]) for row in itens_banco}
+            if ids_banco != set(ids_itens):
+                raise ValueError("Um ou mais itens nao pertencem a cotacao selecionada.")
+
+            pedido_item_ids = [str(row["pedido_item_id"]) for row in itens_banco if row["pedido_item_id"]]
+            for item_id, valor_unitario in valores_por_item.items():
+                cur.execute("""
+                update cotacao_itens
+                set valor_unitario=%s
+                where id=%s and cotacao_id=%s
+                """, (valor_unitario, item_id, int(cotacao_id)))
+
+            cur.execute("""
+            update cotacoes c
+            set valor_total = totais.valor_total
+            from (
+                select cotacao_id, coalesce(sum(valor_total), 0) as valor_total
+                from cotacao_itens
+                where cotacao_id=%s
+                group by cotacao_id
+            ) totais
+            where c.id = totais.cotacao_id
+            """, (int(cotacao_id),))
+
+            cur.execute("""
+            update compras c
+            set valor_compra = case
+                when coalesce((
+                    select sum(nfi.valor_total)
+                    from notas_fiscais nf
+                    join nota_fiscal_itens nfi on nfi.nota_fiscal_id = nf.id
+                    where nf.compra_id = c.id
+                ), 0) > 0 then coalesce((
+                    select sum(nfi.valor_total)
+                    from notas_fiscais nf
+                    join nota_fiscal_itens nfi on nfi.nota_fiscal_id = nf.id
+                    where nf.compra_id = c.id
+                ), 0)
+                else cotacao.valor_total
+            end
+            from cotacoes cotacao
+            where c.cotacao_vencedora_id = cotacao.id
+              and cotacao.id=%s
+            """, (int(cotacao_id),))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    sincronizar_valor_estimado_com_nf(pedido_item_ids)
+    sincronizar_orcamento()
+
+
 @st.dialog("Editar nota fiscal")
 def editar_numero_arquivo_nf_dialog(rubrica_id, solicitacao_id=None):
     filtro_solicitacao = ""
@@ -5142,22 +5224,41 @@ elif menu == "compra_nota":
 
     st.markdown("### Itens da proposta selecionada")
     itens_cotacao_selecionada = cotacoes_itens_df[cotacoes_itens_df["cotacao_id"] == cotacao_vencedora_id].copy()
-    itens_cotacao_exibicao = itens_cotacao_selecionada[["ordem", "fornecedor", "item", "tipo_item", "quantidade", "valor_unitario", "Valor total"]].copy()
-    itens_cotacao_exibicao = itens_cotacao_exibicao.rename(columns={
+    itens_cotacao_editor = itens_cotacao_selecionada[["id", "ordem", "fornecedor", "item", "tipo_item", "quantidade", "valor_unitario"]].copy()
+    itens_cotacao_editor = itens_cotacao_editor.rename(columns={
         "ordem": "Cotação",
         "fornecedor": "Fornecedor",
         "item": "Item",
         "tipo_item": "Tipo",
         "quantidade": "Quantidade",
-        "valor_unitario": "Valor unitário",
+        "valor_unitario": "Valor unitario",
     })
-    itens_cotacao_exibicao["Valor unitário"] = itens_cotacao_exibicao["Valor unitário"].apply(format_currency_brl)
-    itens_cotacao_exibicao["Valor total"] = itens_cotacao_exibicao["Valor total"].apply(format_currency_brl)
-    st.dataframe(
-        itens_cotacao_exibicao,
+    itens_cotacao_editor["Quantidade"] = pd.to_numeric(itens_cotacao_editor["Quantidade"], errors="coerce").fillna(0.0)
+    itens_cotacao_editor["Valor unitario"] = pd.to_numeric(itens_cotacao_editor["Valor unitario"], errors="coerce").fillna(0.0)
+    itens_cotacao_editor = st.data_editor(
+        itens_cotacao_editor,
         use_container_width=True,
         hide_index=True,
+        disabled=["id", "Cotação", "Fornecedor", "Item", "Tipo", "Quantidade"],
+        column_config={
+            "id": None,
+            "Valor unitario": st.column_config.NumberColumn("Valor unitário", min_value=0.0, format="R$ %.2f"),
+        },
+        key=f"itens_cotacao_vencedora_editor_{sid}_{cotacao_vencedora_id}",
     )
+    itens_cotacao_editor["Quantidade"] = pd.to_numeric(itens_cotacao_editor["Quantidade"], errors="coerce").fillna(0.0)
+    itens_cotacao_editor["Valor unitario"] = pd.to_numeric(itens_cotacao_editor["Valor unitario"], errors="coerce").fillna(0.0)
+    itens_cotacao_editor["Valor total"] = itens_cotacao_editor["Quantidade"] * itens_cotacao_editor["Valor unitario"]
+    total_proposta_editado = Decimal(str(itens_cotacao_editor["Valor total"].sum())).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if len(itens_cotacao_editor) else Decimal("0")
+    st.metric("Total da proposta selecionada", format_currency_brl(total_proposta_editado))
+    if st.button("Salvar valores dos itens", key=f"salvar_valores_itens_cotacao_{sid}_{cotacao_vencedora_id}"):
+        try:
+            atualizar_valores_itens_cotacao(int(cotacao_vencedora_id), itens_cotacao_editor)
+        except (ValueError, InvalidOperation, psycopg2.Error) as exc:
+            st.error(str(exc))
+        else:
+            st.success("Valores dos itens atualizados. Totais da compra e do orçamento recalculados.")
+            st.rerun()
     rubrica_pdf_df = query("select codigo, nome, tipo from rubricas where id=%s", (rubrica_compra_id,))
     if len(rubrica_pdf_df):
         rubrica_pdf = rubrica_pdf_df.iloc[0].to_dict()
