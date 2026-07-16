@@ -1337,15 +1337,13 @@ def ensure_financial_governance_schema():
                 then 'PENDENTE: item sem fornecedor vencedor'
             when coalesce(cr.total_vencedoras, 0) > 1
                 then 'ERRO: item com mais de um vencedor'
-            when coalesce(cr.valor_cotado_vencedor, 0) - pi.valor_total > 0.01
-                then 'ERRO: valor cotado maior que solicitado'
             when coalesce(cr.total_cotacoes, 0) < 3
                 then 'PENDENTE: cotacoes complementares pendentes'
             when coalesce(nr.total_itens_nf, 0) = 0
                 then 'PENDENTE: item sem nota fiscal'
-            when coalesce(nr.valor_total_nf_item, 0) - coalesce(cr.valor_cotado_vencedor, 0) > 0.01
-                then 'ERRO: valor da NF maior que cotacao vencedora'
-            when nr.fornecedores_nf is distinct from cr.fornecedor_vencedor
+            when abs(coalesce(nr.valor_total_nf_item, 0) - coalesce(cr.valor_cotado_vencedor, 0)) > 0.01
+                then 'ERRO: valor da NF diverge da cotacao vencedora'
+            when lower(trim(nr.fornecedores_nf)) is distinct from lower(trim(cr.fornecedor_vencedor))
                 then 'ERRO: fornecedor da NF diverge do vencedor'
             when coalesce(nr.tem_arquivo_nf, false) = false
                 then 'PENDENTE: NF sem local/link no Drive'
@@ -6962,6 +6960,209 @@ elif menu == "auditoria":
         if len(auditoria) == 0:
             st.warning("Nenhum dado encontrado para auditoria.")
         else:
+            def decimal_auditoria(valor):
+                if valor is None or pd.isna(valor):
+                    return Decimal("0")
+                return Decimal(str(valor))
+
+            def booleano_auditoria(valor):
+                if valor is None or pd.isna(valor):
+                    return False
+                return bool(valor)
+
+            def texto_auditoria(valor):
+                if valor is None or pd.isna(valor):
+                    return ""
+                return str(valor).strip()
+
+            def destino_ok(row):
+                if int(row.get("total_itens_nf") or 0) == 0:
+                    return False
+                tipo_item = row.get("tipo_item")
+                return (
+                    (tipo_item == "permanente" and not pd.isna(row.get("patrimonio_id")))
+                    or (tipo_item == "consumo" and not pd.isna(row.get("estoque_id")))
+                    or (tipo_item == "servico" and not pd.isna(row.get("atesto_id")))
+                )
+
+            def fase_cotacao(row):
+                total_cotacoes = int(row.get("total_cotacoes") or 0)
+                total_vencedoras = int(row.get("total_vencedoras") or 0)
+                if total_cotacoes == 0:
+                    return "Sem cotacao"
+                if total_vencedoras == 0:
+                    return "Sem vencedora"
+                if total_vencedoras > 1:
+                    return "Mais de uma vencedora"
+                if total_cotacoes < 3:
+                    return f"Faltam {3 - total_cotacoes} cotacao(oes)"
+                return "OK"
+
+            def fase_nf(row):
+                if int(row.get("total_itens_nf") or 0) == 0:
+                    return "Sem NF"
+                valor_nf = decimal_auditoria(row.get("valor_nf_item"))
+                valor_cotado = decimal_auditoria(row.get("valor_cotado_vencedor"))
+                if abs(valor_nf - valor_cotado) > Decimal("0.01"):
+                    return "Valor NF diferente da cotacao"
+                fornecedor_nf = texto_auditoria(row.get("fornecedores_nf")).lower()
+                fornecedor_vencedor = texto_auditoria(row.get("fornecedor_vencedor")).lower()
+                if fornecedor_nf and fornecedor_vencedor and fornecedor_nf != fornecedor_vencedor:
+                    return "Fornecedor NF diferente"
+                if not booleano_auditoria(row.get("tem_arquivo_nf")):
+                    return "NF sem arquivo"
+                return "OK"
+
+            def fase_pagamento(row):
+                if int(row.get("total_itens_nf") or 0) == 0:
+                    return "Aguardando NF"
+                if not booleano_auditoria(row.get("tem_comprovante_bancario")):
+                    return "Sem comprovante"
+                return "OK"
+
+            def fase_destino(row):
+                if int(row.get("total_itens_nf") or 0) == 0:
+                    return "Aguardando NF"
+                if destino_ok(row):
+                    return "OK"
+                tipo_item = row.get("tipo_item")
+                if tipo_item == "permanente":
+                    return "Registrar patrimonio"
+                if tipo_item == "consumo":
+                    return "Registrar estoque"
+                if tipo_item == "servico":
+                    return "Registrar atesto"
+                return "Tipo invalido"
+
+            auditoria_visao = auditoria.copy()
+            auditoria_visao["Cotacao"] = auditoria_visao.apply(fase_cotacao, axis=1)
+            auditoria_visao["Nota fiscal"] = auditoria_visao.apply(fase_nf, axis=1)
+            auditoria_visao["Pagamento"] = auditoria_visao.apply(fase_pagamento, axis=1)
+            auditoria_visao["Destino"] = auditoria_visao.apply(fase_destino, axis=1)
+
+            def situacao_linha(row):
+                criticos = {
+                    "Sem cotacao",
+                    "Sem vencedora",
+                    "Mais de uma vencedora",
+                    "Valor NF diferente da cotacao",
+                    "Fornecedor NF diferente",
+                }
+                if row["Cotacao"] in criticos or row["Nota fiscal"] in criticos:
+                    return "Critico"
+                if row["Pagamento"] != "OK" or row["Destino"] != "OK":
+                    return "Pendente operacional"
+                if row["Cotacao"] != "OK" or row["Nota fiscal"] != "OK":
+                    return "Atencao"
+                return "OK"
+
+            def proxima_acao_linha(row):
+                if row["Cotacao"] != "OK":
+                    return "Revisar cotacao"
+                if row["Nota fiscal"] != "OK":
+                    return "Corrigir nota fiscal"
+                if row["Pagamento"] != "OK":
+                    return "Anexar comprovante"
+                if row["Destino"] != "OK":
+                    return row["Destino"]
+                return "Sem acao"
+
+            auditoria_visao["Situacao"] = auditoria_visao.apply(situacao_linha, axis=1)
+            auditoria_visao["Proxima acao"] = auditoria_visao.apply(proxima_acao_linha, axis=1)
+
+            total = len(auditoria_visao)
+            total_ok = len(auditoria_visao[auditoria_visao["Situacao"] == "OK"])
+            total_critico = len(auditoria_visao[auditoria_visao["Situacao"] == "Critico"])
+            total_pendente = len(auditoria_visao[auditoria_visao["Situacao"] == "Pendente operacional"])
+            total_atencao = len(auditoria_visao[auditoria_visao["Situacao"] == "Atencao"])
+
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Itens auditados", total)
+            c2.metric("OK", total_ok)
+            c3.metric("Criticos", total_critico)
+            c4.metric("Pendentes operacionais", total_pendente)
+            c5.metric("Atencao", total_atencao)
+
+            fila = auditoria_visao[auditoria_visao["Situacao"] != "OK"].copy()
+            ordem_situacao = {"Critico": 0, "Pendente operacional": 1, "Atencao": 2}
+            if len(fila):
+                fila["ordem"] = fila["Situacao"].map(ordem_situacao).fillna(9)
+                fila = fila.sort_values(["ordem", "rubrica_codigo", "solicitacao_id", "descricao"]).drop(columns=["ordem"])
+                tabela_fila = fila[[
+                    "Situacao",
+                    "Proxima acao",
+                    "rubrica_codigo",
+                    "solicitacao_id",
+                    "descricao",
+                    "tipo_item",
+                    "Cotacao",
+                    "Nota fiscal",
+                    "Pagamento",
+                    "Destino",
+                    "valor_cotado_vencedor",
+                    "valor_nf_item",
+                    "notas_fiscais",
+                    "fornecedor_vencedor",
+                    "fornecedores_nf",
+                ]].rename(columns={
+                    "rubrica_codigo": "Rubrica",
+                    "solicitacao_id": "Solicitacao",
+                    "descricao": "Item",
+                    "tipo_item": "Tipo",
+                    "valor_cotado_vencedor": "Valor cotado",
+                    "valor_nf_item": "Valor NF",
+                    "notas_fiscais": "NF",
+                    "fornecedor_vencedor": "Fornecedor vencedor",
+                    "fornecedores_nf": "Fornecedor NF",
+                })
+                for coluna in ["Valor cotado", "Valor NF"]:
+                    tabela_fila[coluna] = tabela_fila[coluna].apply(format_currency_brl)
+                tabela_fila["Tipo"] = tabela_fila["Tipo"].apply(normalizar_texto_portugues)
+                st.markdown("### Fila de auditoria")
+                st.dataframe(tabela_fila, use_container_width=True, hide_index=True)
+            else:
+                st.success("Auditoria sem pendencias.")
+
+            with st.expander("Resumo por rubrica", expanded=False):
+                resumo_rubrica = (
+                    auditoria_visao
+                    .groupby(["rubrica_codigo", "rubrica_nome"], dropna=False)
+                    .agg(
+                        itens=("pedido_item_id", "count"),
+                        criticos=("Situacao", lambda valores: (valores == "Critico").sum()),
+                        pendentes_operacionais=("Situacao", lambda valores: (valores == "Pendente operacional").sum()),
+                        atencao=("Situacao", lambda valores: (valores == "Atencao").sum()),
+                        ok=("Situacao", lambda valores: (valores == "OK").sum()),
+                        valor_cotado=("valor_cotado_vencedor", "sum"),
+                        valor_nf=("valor_nf_item", "sum"),
+                        saldo_restante=("rubrica_saldo_restante", "first"),
+                    )
+                    .reset_index()
+                    .rename(columns={
+                        "rubrica_codigo": "Rubrica",
+                        "rubrica_nome": "Nome",
+                        "itens": "Itens",
+                        "criticos": "Criticos",
+                        "pendentes_operacionais": "Pendentes operacionais",
+                        "atencao": "Atencao",
+                        "ok": "OK",
+                        "valor_cotado": "Valor cotado",
+                        "valor_nf": "Valor NF",
+                        "saldo_restante": "Saldo restante",
+                    })
+                )
+                for coluna in ["Valor cotado", "Valor NF", "Saldo restante"]:
+                    resumo_rubrica[coluna] = resumo_rubrica[coluna].apply(format_currency_brl)
+                st.dataframe(resumo_rubrica, use_container_width=True, hide_index=True)
+
+            with st.expander("Conferencia NF x itens", expanded=False):
+                st.dataframe(preparar_tabela_auditoria(conferencia_nf), use_container_width=True, hide_index=True)
+
+            with st.expander("Dados completos", expanded=False):
+                st.dataframe(preparar_tabela_auditoria(auditoria_visao), use_container_width=True, hide_index=True)
+
+            st.stop()
+
             total = len(auditoria)
             ok = len(auditoria[auditoria["status_auditoria"] == "OK"])
             pendencias = total - ok
