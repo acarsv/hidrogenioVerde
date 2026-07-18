@@ -3101,27 +3101,51 @@ def sincronizar_orcamento():
     update rubricas r
     set valor_reservado = totais.valor_total
     from (
-        select
-          pi.rubrica_id,
-          coalesce(sum(pi.valor_total), 0) as valor_total
-        from pedido_itens pi
-        join solicitacoes_compra s on s.id = pi.pedido_id
-        where s.status in ('solicitacao', 'em_andamento', 'cotado', 'aguardando_nota')
-          and not exists (
-              select 1
-              from compras c
-              where c.solicitacao_id = s.id
-          )
-          and not exists (
-              select 1
-              from nota_fiscal_itens nfi
-              left join patrimonio p on p.nota_fiscal_item_id = nfi.id
-              left join estoque_consumo e on e.nota_fiscal_item_id = nfi.id
-              left join atesto_servico a on a.nota_fiscal_item_id = nfi.id
-              where nfi.pedido_item_id = pi.id
-                and (p.id is not null or e.id is not null or a.id is not null)
-          )
-        group by pi.rubrica_id
+        with reservas_sem_compra as (
+            select
+              pi.rubrica_id,
+              coalesce(sum(pi.valor_total), 0) as valor_total
+            from pedido_itens pi
+            join solicitacoes_compra s on s.id = pi.pedido_id
+            where s.status in ('solicitacao', 'em_andamento', 'cotado', 'aguardando_nota')
+              and not exists (
+                  select 1
+                  from compras c
+                  where c.solicitacao_id = s.id
+              )
+              and not exists (
+                  select 1
+                  from nota_fiscal_itens nfi
+                  left join patrimonio p on p.nota_fiscal_item_id = nfi.id
+                  left join estoque_consumo e on e.nota_fiscal_item_id = nfi.id
+                  left join atesto_servico a on a.nota_fiscal_item_id = nfi.id
+                  where nfi.pedido_item_id = pi.id
+                    and (p.id is not null or e.id is not null or a.id is not null)
+              )
+            group by pi.rubrica_id
+        ),
+        compras_sem_nf as (
+            select
+              s.rubrica_id,
+              coalesce(sum(c.valor_compra), 0) as valor_total
+            from compras c
+            join solicitacoes_compra s on s.id = c.solicitacao_id
+            where s.status = 'aguardando_nota'
+              and not exists (
+                  select 1
+                  from notas_fiscais nf
+                  where nf.compra_id = c.id
+                     or nf.solicitacao_id = s.id
+              )
+            group by s.rubrica_id
+        )
+        select rubrica_id, coalesce(sum(valor_total), 0) as valor_total
+        from (
+            select * from reservas_sem_compra
+            union all
+            select * from compras_sem_nf
+        ) reservas
+        group by rubrica_id
     ) totais
     where r.id = totais.rubrica_id
     """)
@@ -3309,6 +3333,24 @@ if menu == "orcamento":
         df["qtd_compras_periodo"] = 0
     df["valor_compras_periodo"] = pd.to_numeric(df["valor_compras_periodo"], errors="coerce").fillna(0)
     df["qtd_compras_periodo"] = pd.to_numeric(df["qtd_compras_periodo"], errors="coerce").fillna(0).astype(int)
+    compras_empenhadas_pendentes = query("""
+    select coalesce(sum(c.valor_compra), 0) as valor_total
+    from compras c
+    join solicitacoes_compra s on s.id = c.solicitacao_id
+    where c.comprado_em::date between %s and %s
+      and s.status = 'aguardando_nota'
+      and not exists (
+          select 1
+          from notas_fiscais nf
+          where nf.compra_id = c.id
+             or nf.solicitacao_id = s.id
+      )
+    """, (PERIODO_PRESTACAO_INICIO, PERIODO_PRESTACAO_FIM))
+    total_empenhado_aguardando_nf = (
+        Decimal(str(compras_empenhadas_pendentes.iloc[0]["valor_total"] or 0))
+        if len(compras_empenhadas_pendentes)
+        else Decimal("0")
+    )
 
     percentual_tempo_prestacao = percentual_periodo_prestacao()
     df["percentual_compras_periodo"] = df.apply(
@@ -3408,11 +3450,12 @@ if menu == "orcamento":
     st.dataframe(resumo_tipo_exibicao, use_container_width=True, hide_index=True)
 
     st.markdown("### Sinalização inteligente de compras")
-    p1, p2, p3, p4 = st.columns(4)
+    p1, p2, p3, p4, p5 = st.columns(5)
     p1.metric("Período da prestação", f"{percentual_tempo_prestacao:.2f}%")
     p2.metric("Compras executadas", format_currency_brl(total_compras_periodo))
-    p3.metric("Progresso das compras", f"{percentual_compras_global:.2f}%")
-    p4.metric("Eficiência tempo x compras", f"{eficiencia_compras:.2f}%")
+    p3.metric("Empenhado aguardando NF", format_currency_brl(total_empenhado_aguardando_nf))
+    p4.metric("Progresso das compras", f"{percentual_compras_global:.2f}%")
+    p5.metric("Eficiência tempo x compras", f"{eficiencia_compras:.2f}%")
     barra_tempo, barra_compras, sinal_risco = st.columns([2, 2, 1])
     with barra_tempo:
         st.caption("Tempo decorrido: mar/2026 até mar/2027")
