@@ -2747,34 +2747,6 @@ def ajustar_valor_solicitado_para_nf(pedido_item_id, usuario_id):
 
 
 def sincronizar_valor_estimado_com_nf(pedido_item_ids=None):
-    filtro_nf = ""
-    params_nf = []
-    if pedido_item_ids:
-        filtro_nf = """
-        where exists (
-            select 1
-            from nota_fiscal_itens nfi_filtro
-            where nfi_filtro.nota_fiscal_id = nf.id
-              and nfi_filtro.pedido_item_id = any(%s::uuid[])
-        )
-        """
-        params_nf.append([str(item_id) for item_id in pedido_item_ids])
-
-    execute(f"""
-    update notas_fiscais nf
-    set valor_nf = totais.valor_total
-    from (
-        select
-          nf.id as nota_fiscal_id,
-          coalesce(sum(nfi.valor_total), 0) as valor_total
-        from notas_fiscais nf
-        left join nota_fiscal_itens nfi on nfi.nota_fiscal_id = nf.id
-        {filtro_nf}
-        group by nf.id
-    ) totais
-    where nf.id = totais.nota_fiscal_id
-    """, tuple(params_nf))
-
     filtro_compras = ""
     params_compras = []
     if pedido_item_ids:
@@ -2795,9 +2767,8 @@ def sincronizar_valor_estimado_com_nf(pedido_item_ids=None):
     from (
         select
           nf.compra_id,
-          coalesce(sum(nfi.valor_total), 0) as valor_total
+          coalesce(sum(nf.valor_nf), 0) as valor_total
         from notas_fiscais nf
-        join nota_fiscal_itens nfi on nfi.nota_fiscal_id = nf.id
         where nf.compra_id is not null
         group by nf.compra_id
     ) totais
@@ -7851,28 +7822,54 @@ elif menu == "itens_comprados":
         )
 
         def recalcular_totais_nota_compra(nota_fiscal_id, compra_id):
-            execute("""
-            update notas_fiscais nf
-            set valor_nf = totais.valor_total
-            from (
-              select coalesce(sum(valor_total), 0) as valor_total
-              from nota_fiscal_itens
-              where nota_fiscal_id=%s
-            ) totais
-            where nf.id=%s
-            """, (int(nota_fiscal_id), int(nota_fiscal_id)))
             if compra_id is not None and not pd.isna(compra_id):
                 execute("""
                 update compras c
                 set valor_compra = totais.valor_total
                 from (
-                  select coalesce(sum(nfi.valor_total), 0) as valor_total
+                  select coalesce(sum(nf.valor_nf), 0) as valor_total
                   from notas_fiscais nf
-                  join nota_fiscal_itens nfi on nfi.nota_fiscal_id = nf.id
                   where nf.compra_id=%s
                 ) totais
                 where c.id=%s
                 """, (int(compra_id), int(compra_id)))
+
+        def validar_total_nota_sem_alterar(nota_fiscal_id, item_nf_id, novo_total_item=None, deletar=False):
+            totais = query("""
+            select
+              nf.valor_nf,
+              coalesce(sum(
+                case
+                  when nfi.id=%s::uuid and %s then 0
+                  when nfi.id=%s::uuid and %s is not null then %s
+                  else nfi.valor_total
+                end
+              ), 0) as soma_itens
+            from notas_fiscais nf
+            left join nota_fiscal_itens nfi on nfi.nota_fiscal_id = nf.id
+            where nf.id=%s
+            group by nf.id, nf.valor_nf
+            """, (
+                str(item_nf_id),
+                bool(deletar),
+                str(item_nf_id),
+                novo_total_item,
+                novo_total_item,
+                int(nota_fiscal_id),
+            ))
+            if len(totais) == 0:
+                return
+            valor_nf_atual = Decimal(str(totais.iloc[0]["valor_nf"] or 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            soma_itens = Decimal(str(totais.iloc[0]["soma_itens"] or 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            diferenca = (soma_itens - valor_nf_atual).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            if diferenca != Decimal("0.00"):
+                raise ValueError(
+                    "A soma dos itens ficaria diferente do valor pago da NF. "
+                    f"NF: {format_currency_brl(valor_nf_atual)}; "
+                    f"soma dos itens: {format_currency_brl(soma_itens)}; "
+                    f"diferenca: {format_currency_brl(diferenca)}. "
+                    "Ajuste os demais itens da mesma NF para fechar o total."
+                )
 
         def remover_nota_vazia(nota_fiscal_id):
             execute("""
@@ -7917,6 +7914,7 @@ elif menu == "itens_comprados":
                         compra_id = linha_original["_compra_id"]
                         pedido_item_id = linha_original["_pedido_item_id"]
                         if linha["Ação"] == "Deletar":
+                            validar_total_nota_sem_alterar(nota_fiscal_id, item_nf_id, deletar=True)
                             execute("delete from nota_fiscal_itens where id=%s", (item_nf_id,))
                             sincronizar_valor_estimado_com_nf([pedido_item_id])
                             recalcular_totais_nota_compra(nota_fiscal_id, compra_id)
@@ -7938,6 +7936,8 @@ elif menu == "itens_comprados":
                                 erros.append(f"Linha item NF #{item_nf_id}: valor unitário não pode ser negativo.")
                                 continue
                             data_emissao = linha["Data de emissão"]
+                            novo_total_item = (quantidade * valor_unitario).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                            validar_total_nota_sem_alterar(nota_fiscal_id, item_nf_id, novo_total_item=novo_total_item)
                             salvar_pedido_id_manual(linha["pedido_id"], pedido_item_id)
                             execute("""
                             update nota_fiscal_itens
