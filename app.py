@@ -5797,24 +5797,14 @@ elif menu == "compra_nota":
                 itens_nf_editor_gravacao = itens_nf_editor.copy()
                 valor_nf_decimal = Decimal(str(valor_nf)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                 valor_nf_padrao_decimal = Decimal(str(valor_nf_padrao)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                def ajustar_ultimo_item_nf(total_alvo):
-                    diferenca_total = (total_alvo - valor_nf_padrao_decimal).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                    if len(itens_nf_editor_gravacao) == 0:
-                        st.error("Selecione pelo menos um item para ajustar a nota fiscal.")
-                        st.stop()
-                    indice_ultimo = itens_nf_editor_gravacao.index[-1]
-                    quantidade_ultimo = Decimal(str(itens_nf_editor_gravacao.loc[indice_ultimo, "Quantidade"]))
-                    valor_unitario_ultimo = Decimal(str(itens_nf_editor_gravacao.loc[indice_ultimo, "Valor unitario NF"]))
-                    if quantidade_ultimo <= 0:
-                        st.error("A quantidade do item da NF deve ser maior que zero.")
-                        st.stop()
-                    valor_total_ultimo = (quantidade_ultimo * valor_unitario_ultimo).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                    novo_total_ultimo = (valor_total_ultimo + diferenca_total).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                    if novo_total_ultimo < 0:
-                        st.error("O valor total da NF nao pode ser menor que a soma dos demais itens.")
-                        st.stop()
-                    novo_valor_unitario = (novo_total_ultimo / quantidade_ultimo).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                    itens_nf_editor_gravacao.loc[indice_ultimo, "Valor unitario NF"] = float(novo_valor_unitario)
+                def bloquear_soma_divergente(total_alvo, total_itens):
+                    diferenca = (total_alvo - total_itens).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    st.error(
+                        "A soma dos itens da NF deve bater com o valor da NF. "
+                        f"Diferença atual: {format_currency_brl(diferenca)}. "
+                        "Ajuste o valor unitário do item correto antes de salvar."
+                    )
+                    st.stop()
 
                 nota_existente = query("""
                 select
@@ -5847,13 +5837,12 @@ elif menu == "compra_nota":
                     elif valor_restante_nf == valor_nf_padrao_decimal:
                         valor_nf_final = valor_nf_decimal
                     elif valor_restante_nf >= 0:
-                        ajustar_ultimo_item_nf(valor_restante_nf)
-                        valor_nf_final = valor_nf_decimal
+                        bloquear_soma_divergente(valor_restante_nf, valor_nf_padrao_decimal)
                     else:
                         st.error("O valor total da NF nao pode ser menor que os itens ja lancados para essa NF.")
                         st.stop()
                 elif valor_nf_decimal != valor_nf_padrao_decimal:
-                    ajustar_ultimo_item_nf(valor_nf_decimal)
+                    bloquear_soma_divergente(valor_nf_decimal, valor_nf_padrao_decimal)
                 upload_nf_resultado = None
                 local_nf_final = local_nf.strip()
                 if arquivo_nf is not None:
@@ -7737,12 +7726,12 @@ elif menu == "itens_comprados":
       r.nome as "Nome da rubrica",
       nfi.descricao as "Produto/serviço",
       nfi.quantidade as "Quantidade",
-      coalesce(cotacao_vencedora.valor_unitario, nfi.valor_unitario) as "Valor unitário",
-      coalesce(cotacao_vencedora.valor_total, nfi.valor_total) as "Valor da compra",
+      nfi.valor_unitario as "Valor unitário",
+      nfi.valor_total as "Valor da compra",
       coalesce(cotacao_vencedora.fornecedor, nf.fornecedor) as "Fornecedor da cotação",
       nf.numero_nf as "Número da NF",
       nf.fornecedor as "Fornecedor da NF",
-      coalesce(cotacao_vencedora.valor_total, nfi.valor_total) as "Valor da NF",
+      nfi.valor_total as "Valor da NF",
       nf.data_emissao as "Data de emissão",
       nf.lancado_em as "Lançado em"
     from nota_fiscal_itens nfi
