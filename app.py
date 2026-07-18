@@ -2747,78 +2747,63 @@ def ajustar_valor_solicitado_para_nf(pedido_item_id, usuario_id):
 
 
 def sincronizar_valor_estimado_com_nf(pedido_item_ids=None):
-    filtro_itens = ""
-    params = []
+    filtro_nf = ""
+    params_nf = []
     if pedido_item_ids:
-        filtro_itens = "where pi.id = any(%s::uuid[])"
-        params.append([str(item_id) for item_id in pedido_item_ids])
-
-    execute(f"""
-    update pedido_itens pi
-    set valor_unitario = round(
-        coalesce(nullif(totais.valor_nf_item, 0), nullif(totais.valor_cotado_vencedor, 0), pi.valor_total)
-        / nullif(pi.quantidade, 0),
-        2
-    )
-    from (
-        select
-          pi.id as pedido_item_id,
-          coalesce(sum(nfi.valor_total), 0) as valor_nf_item,
-          coalesce((
-              select sum(
-                  case
-                    when totais_cotacao.total_itens = 1 and coalesce(c.valor_total, 0) > 0
-                      then c.valor_total
-                    else ci.valor_total
-                  end
-              )
-              from cotacao_itens ci
-              join cotacoes c on c.id = ci.cotacao_id
-              join (
-                  select cotacao_id, count(*) as total_itens
-                  from cotacao_itens
-                  group by cotacao_id
-              ) totais_cotacao on totais_cotacao.cotacao_id = ci.cotacao_id
-              where ci.pedido_item_id = pi.id
-                and ci.vencedor = true
-          ), 0) as valor_cotado_vencedor
-        from pedido_itens pi
-        left join nota_fiscal_itens nfi on nfi.pedido_item_id = pi.id
-        {filtro_itens}
-        group by pi.id
-    ) totais
-    where pi.id = totais.pedido_item_id
-      and pi.quantidade > 0
-    """, tuple(params))
-
-    filtro_solicitacoes = ""
-    params_solicitacoes = []
-    if pedido_item_ids:
-        filtro_solicitacoes = """
-        where pedido_id in (
-            select distinct pedido_id
-            from pedido_itens
-            where id = any(%s::uuid[])
+        filtro_nf = """
+        where exists (
+            select 1
+            from nota_fiscal_itens nfi_filtro
+            where nfi_filtro.nota_fiscal_id = nf.id
+              and nfi_filtro.pedido_item_id = any(%s::uuid[])
         )
         """
-        params_solicitacoes.append([str(item_id) for item_id in pedido_item_ids])
+        params_nf.append([str(item_id) for item_id in pedido_item_ids])
 
     execute(f"""
-    update solicitacoes_compra s
-    set valor_estimado = totais.valor_total,
-        quantidade = totais.quantidade_total,
-        atualizado_em = now()
+    update notas_fiscais nf
+    set valor_nf = totais.valor_total
     from (
         select
-          pedido_id,
-          coalesce(sum(valor_total), 0) as valor_total,
-          coalesce(sum(quantidade), 0) as quantidade_total
-        from pedido_itens
-        {filtro_solicitacoes}
-        group by pedido_id
+          nf.id as nota_fiscal_id,
+          coalesce(sum(nfi.valor_total), 0) as valor_total
+        from notas_fiscais nf
+        left join nota_fiscal_itens nfi on nfi.nota_fiscal_id = nf.id
+        {filtro_nf}
+        group by nf.id
     ) totais
-    where s.id = totais.pedido_id
-    """, tuple(params_solicitacoes))
+    where nf.id = totais.nota_fiscal_id
+    """, tuple(params_nf))
+
+    filtro_compras = ""
+    params_compras = []
+    if pedido_item_ids:
+        filtro_compras = """
+        and exists (
+            select 1
+            from notas_fiscais nf_filtro
+            join nota_fiscal_itens nfi_filtro on nfi_filtro.nota_fiscal_id = nf_filtro.id
+            where nf_filtro.compra_id = c.id
+              and nfi_filtro.pedido_item_id = any(%s::uuid[])
+        )
+        """
+        params_compras.append([str(item_id) for item_id in pedido_item_ids])
+
+    execute(f"""
+    update compras c
+    set valor_compra = totais.valor_total
+    from (
+        select
+          nf.compra_id,
+          coalesce(sum(nfi.valor_total), 0) as valor_total
+        from notas_fiscais nf
+        join nota_fiscal_itens nfi on nfi.nota_fiscal_id = nf.id
+        where nf.compra_id is not null
+        group by nf.compra_id
+    ) totais
+    where c.id = totais.compra_id
+      {filtro_compras}
+    """, tuple(params_compras))
 
 
 def sincronizar_status_operacional():
