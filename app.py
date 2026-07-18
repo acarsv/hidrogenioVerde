@@ -7737,12 +7737,12 @@ elif menu == "itens_comprados":
       r.nome as "Nome da rubrica",
       nfi.descricao as "Produto/serviço",
       nfi.quantidade as "Quantidade",
-      nfi.valor_unitario as "Valor unitário",
-      nfi.valor_total as "Valor da compra",
-      nf.fornecedor as "Fornecedor da cotação",
+      coalesce(cotacao_vencedora.valor_unitario, nfi.valor_unitario) as "Valor unitário",
+      coalesce(cotacao_vencedora.valor_total, nfi.valor_total) as "Valor da compra",
+      coalesce(cotacao_vencedora.fornecedor, nf.fornecedor) as "Fornecedor da cotação",
       nf.numero_nf as "Número da NF",
       nf.fornecedor as "Fornecedor da NF",
-      nfi.valor_total as "Valor da NF",
+      coalesce(cotacao_vencedora.valor_total, nfi.valor_total) as "Valor da NF",
       nf.data_emissao as "Data de emissão",
       nf.lancado_em as "Lançado em"
     from nota_fiscal_itens nfi
@@ -7751,6 +7751,18 @@ elif menu == "itens_comprados":
     join solicitacoes_compra s on s.id = pi.pedido_id
     join rubricas r on r.id = pi.rubrica_id
     left join pedidos p on p.solicitacao_id = s.id
+    left join lateral (
+      select
+        ci.valor_unitario,
+        ci.valor_total,
+        c.fornecedor
+      from cotacao_itens ci
+      join cotacoes c on c.id = ci.cotacao_id
+      where ci.pedido_item_id = pi.id
+        and ci.vencedor = true
+      order by ci.id
+      limit 1
+    ) cotacao_vencedora on true
     where s.status = 'finalizado'
     order by nf.lancado_em desc nulls last, nf.numero_nf, nfi.descricao
     """)
