@@ -1600,6 +1600,7 @@ def carregar_compras_por_mes_orcamento():
     from compras c
     join solicitacoes_compra s on s.id = c.solicitacao_id
     where c.comprado_em::date between %s and %s
+      and s.status = 'finalizado'
     group by 1
     order by 1
     """, (PERIODO_PRESTACAO_INICIO, PERIODO_PRESTACAO_FIM))
@@ -3298,6 +3299,7 @@ if menu == "orcamento":
     from compras c
     join solicitacoes_compra s on s.id = c.solicitacao_id
     where c.comprado_em::date between %s and %s
+      and s.status = 'finalizado'
     group by s.rubrica_id
     """, (PERIODO_PRESTACAO_INICIO, PERIODO_PRESTACAO_FIM))
     if len(compras_rubrica):
