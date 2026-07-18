@@ -7834,41 +7834,65 @@ elif menu == "itens_comprados":
                 where c.id=%s
                 """, (int(compra_id), int(compra_id)))
 
-        def validar_total_nota_sem_alterar(nota_fiscal_id, item_nf_id, novo_total_item=None, deletar=False):
-            totais = query("""
-            select
-              nf.valor_nf,
-              coalesce(sum(
-                case
-                  when nfi.id=%s::uuid and %s then 0
-                  when nfi.id=%s::uuid and %s is not null then %s
-                  else nfi.valor_total
-                end
-              ), 0) as soma_itens
-            from notas_fiscais nf
-            left join nota_fiscal_itens nfi on nfi.nota_fiscal_id = nf.id
-            where nf.id=%s
-            group by nf.id, nf.valor_nf
-            """, (
-                str(item_nf_id),
-                bool(deletar),
-                str(item_nf_id),
-                novo_total_item,
-                novo_total_item,
-                int(nota_fiscal_id),
-            ))
-            if len(totais) == 0:
+        def validar_totais_notas_apos_acoes(linhas_acao):
+            nota_ids = sorted({
+                int(editor_df.loc[indice_linha]["_nota_fiscal_id"])
+                for indice_linha in linhas_acao.index
+                if indice_linha in editor_df.index
+            })
+            if not nota_ids:
                 return
-            valor_nf_atual = Decimal(str(totais.iloc[0]["valor_nf"] or 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            soma_itens = Decimal(str(totais.iloc[0]["soma_itens"] or 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            diferenca = (soma_itens - valor_nf_atual).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            if diferenca != Decimal("0.00"):
+            itens_notas = query("""
+            select
+              nf.id as nota_fiscal_id,
+              nf.valor_nf,
+              nfi.id::text as item_nf_id,
+              nfi.valor_total
+            from notas_fiscais nf
+            join nota_fiscal_itens nfi on nfi.nota_fiscal_id = nf.id
+            where nf.id = any(%s)
+            """, (nota_ids,))
+            if len(itens_notas) == 0:
+                return
+            valores_nf = {}
+            totais_por_nota = {}
+            item_para_nota = {}
+            for _, item_nota in itens_notas.iterrows():
+                nota_id = int(item_nota["nota_fiscal_id"])
+                valores_nf[nota_id] = Decimal(str(item_nota["valor_nf"] or 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                totais_por_nota[nota_id] = totais_por_nota.get(nota_id, Decimal("0.00")) + Decimal(str(item_nota["valor_total"] or 0))
+                item_para_nota[str(item_nota["item_nf_id"])] = nota_id
+            for indice_linha, linha in linhas_acao.iterrows():
+                if indice_linha not in editor_df.index:
+                    continue
+                linha_original = editor_df.loc[indice_linha]
+                item_nf_id = str(linha_original["_item_nf_id"])
+                nota_id = item_para_nota.get(item_nf_id)
+                if nota_id is None:
+                    continue
+                valor_original = Decimal(str(linha_original["Valor da compra"] or 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                if linha["Ação"] == "Deletar":
+                    novo_total = Decimal("0.00")
+                else:
+                    quantidade = Decimal(str(linha["Quantidade"]))
+                    valor_unitario = Decimal(str(linha["Valor unitário"]))
+                    novo_total = (quantidade * valor_unitario).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                totais_por_nota[nota_id] = (totais_por_nota[nota_id] - valor_original + novo_total).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            erros_total = []
+            for nota_id, soma_itens in totais_por_nota.items():
+                valor_nf_atual = valores_nf.get(nota_id, Decimal("0.00"))
+                diferenca = (soma_itens - valor_nf_atual).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                if diferenca != Decimal("0.00"):
+                    erros_total.append(
+                        f"NF #{nota_id}: valor da NF {format_currency_brl(valor_nf_atual)}, "
+                        f"soma dos itens {format_currency_brl(soma_itens)}, "
+                        f"diferenca {format_currency_brl(diferenca)}."
+                    )
+            if erros_total:
                 raise ValueError(
-                    "A soma dos itens ficaria diferente do valor pago da NF. "
-                    f"NF: {format_currency_brl(valor_nf_atual)}; "
-                    f"soma dos itens: {format_currency_brl(soma_itens)}; "
-                    f"diferenca: {format_currency_brl(diferenca)}. "
-                    "Ajuste os demais itens da mesma NF para fechar o total."
+                    "A soma dos itens precisa bater com o valor pago da NF. "
+                    "Corrija todos os itens da mesma nota na mesma operação. "
+                    + " ".join(erros_total)
                 )
 
         def remover_nota_vazia(nota_fiscal_id):
@@ -7903,7 +7927,13 @@ elif menu == "itens_comprados":
                 total_salvas = 0
                 total_deletadas = 0
                 erros = []
+                try:
+                    validar_totais_notas_apos_acoes(linhas_acao)
+                except Exception as exc:
+                    erros.append(str(exc))
                 for indice_linha, linha in linhas_acao.iterrows():
+                    if erros:
+                        break
                     if indice_linha not in editor_df.index:
                         erros.append("Linha sem identificador interno. Recarregue a pagina e tente novamente.")
                         continue
@@ -7914,7 +7944,6 @@ elif menu == "itens_comprados":
                         compra_id = linha_original["_compra_id"]
                         pedido_item_id = linha_original["_pedido_item_id"]
                         if linha["Ação"] == "Deletar":
-                            validar_total_nota_sem_alterar(nota_fiscal_id, item_nf_id, deletar=True)
                             execute("delete from nota_fiscal_itens where id=%s", (item_nf_id,))
                             sincronizar_valor_estimado_com_nf([pedido_item_id])
                             recalcular_totais_nota_compra(nota_fiscal_id, compra_id)
@@ -7936,8 +7965,6 @@ elif menu == "itens_comprados":
                                 erros.append(f"Linha item NF #{item_nf_id}: valor unitário não pode ser negativo.")
                                 continue
                             data_emissao = linha["Data de emissão"]
-                            novo_total_item = (quantidade * valor_unitario).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                            validar_total_nota_sem_alterar(nota_fiscal_id, item_nf_id, novo_total_item=novo_total_item)
                             salvar_pedido_id_manual(linha["pedido_id"], pedido_item_id)
                             execute("""
                             update nota_fiscal_itens
