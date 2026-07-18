@@ -3157,36 +3157,14 @@ def sincronizar_orcamento():
     update rubricas r
     set valor_utilizado = totais.valor_total
     from (
-        with compra_base as (
-            select distinct
-              c.id as compra_id,
-              coalesce(pi_ci.pedido_manual_id, ped_ci.id, s_ci.id, pi_s.pedido_manual_id, ped_s.id, s.id) as pedido_id,
-              coalesce(cot.rubrica_id, s.rubrica_id) as rubrica_id,
-              c.valor_compra,
-              c.comprado_em
-            from compras c
-            join solicitacoes_compra s on s.id = c.solicitacao_id
-            left join cotacoes cot on cot.id = c.cotacao_vencedora_id
-            left join cotacao_itens ci on ci.cotacao_id = c.cotacao_vencedora_id
-            left join pedido_itens pi_ci on pi_ci.id = ci.pedido_item_id
-            left join solicitacoes_compra s_ci on s_ci.id = pi_ci.pedido_id
-            left join pedidos ped_ci on ped_ci.solicitacao_id = s_ci.id
-            left join pedido_itens pi_s on pi_s.pedido_id = s.id
-            left join pedidos ped_s on ped_s.solicitacao_id = s.id
-        ),
-        compra_unica as (
-            select distinct on (rubrica_id, pedido_id)
-              rubrica_id,
-              valor_compra
-            from compra_base
-            where pedido_id is not null
-            order by rubrica_id, pedido_id, comprado_em desc nulls last, compra_id desc
-        )
         select
-          rubrica_id,
-          coalesce(sum(valor_compra), 0) as valor_total
-        from compra_unica
-        group by rubrica_id
+          pi.rubrica_id,
+          coalesce(sum(nfi.valor_total), 0) as valor_total
+        from nota_fiscal_itens nfi
+        join pedido_itens pi on pi.id = nfi.pedido_item_id
+        join solicitacoes_compra s on s.id = pi.pedido_id
+        where s.status = 'finalizado'
+        group by pi.rubrica_id
     ) totais
     where r.id = totais.rubrica_id
     """)
@@ -6816,6 +6794,7 @@ elif menu == "pedidos_finalizados":
     exibicao["Notas fiscais"] = exibicao["total_notas"].fillna(0).astype(int)
     exibicao["Comprovantes"] = exibicao["total_comprovantes"].fillna(0).astype(int)
     exibicao["Criado em"] = pd.to_datetime(exibicao["criado_em"]).dt.strftime("%d/%m/%Y %H:%M")
+    valor_total_pedidos_finalizados = Decimal(str(pedidos_finalizados["valor"].sum())).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     exibicao = exibicao[[
         "Pedido",
         "Solicitações",
@@ -6829,6 +6808,14 @@ elif menu == "pedidos_finalizados":
         "Comprovantes",
         "Criado em",
     ]].rename(columns={"pedido": "Resumo"})
+    linha_total = {coluna: "" for coluna in exibicao.columns}
+    linha_total["Pedido"] = "TOTAL"
+    linha_total["Valor total"] = format_currency_brl(valor_total_pedidos_finalizados)
+    linha_total["Itens"] = int(pedidos_finalizados["total_itens"].fillna(0).sum())
+    linha_total["Notas fiscais"] = int(pedidos_finalizados["total_notas"].fillna(0).sum())
+    linha_total["Comprovantes"] = int(pedidos_finalizados["total_comprovantes"].fillna(0).sum())
+    exibicao = pd.concat([exibicao, pd.DataFrame([linha_total])], ignore_index=True)
+    st.metric("Total dos pedidos finalizados", format_currency_brl(valor_total_pedidos_finalizados))
     st.dataframe(exibicao, use_container_width=True, hide_index=True)
 
     st.markdown("### Cancelar pedido")
