@@ -7686,6 +7686,7 @@ elif menu == "ia_operacional":
             st.dataframe(preparar_tabela_ia(todos_alertas), use_container_width=True, hide_index=True)
 
 elif menu == "itens_comprados":
+    sincronizar_orcamento()
     df = query("""
     select
       nfi.id as "_item_nf_id",
@@ -7752,6 +7753,37 @@ elif menu == "itens_comprados":
             file_name=f"produtos_comprados_por_rubrica_{date.today().isoformat()}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+        total_itens_comprados = Decimal(str(df["Valor da compra"].sum())).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        total_orcamento_usado = query("select coalesce(sum(valor_utilizado), 0) as total from rubricas")
+        total_orcamento_usado_valor = (
+            Decimal(str(total_orcamento_usado.iloc[0]["total"])).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            if len(total_orcamento_usado)
+            else Decimal("0.00")
+        )
+        col_total_itens, col_total_orcamento, col_diferenca = st.columns(3)
+        col_total_itens.metric("Total dos itens comprados", format_currency_brl(total_itens_comprados))
+        col_total_orcamento.metric("Valor usado no orçamento", format_currency_brl(total_orcamento_usado_valor))
+        col_diferenca.metric("Diferença", format_currency_brl(total_itens_comprados - total_orcamento_usado_valor))
+        conferencia_rubrica = query("""
+        select
+          r.codigo as "Rubrica",
+          coalesce(sum(nfi.valor_total), 0) as "Itens comprados",
+          r.valor_utilizado as "Usado no orçamento",
+          coalesce(sum(nfi.valor_total), 0) - r.valor_utilizado as "Diferença"
+        from rubricas r
+        left join pedido_itens pi on pi.rubrica_id = r.id
+        left join solicitacoes_compra s on s.id = pi.pedido_id and s.status = 'finalizado'
+        left join nota_fiscal_itens nfi on nfi.pedido_item_id = pi.id and s.id is not null
+        group by r.id, r.codigo, r.valor_utilizado
+        having abs(coalesce(sum(nfi.valor_total), 0) - r.valor_utilizado) > 0.009
+        order by r.codigo
+        """)
+        if len(conferencia_rubrica):
+            conferencia_exibicao = conferencia_rubrica.copy()
+            for coluna in ["Itens comprados", "Usado no orçamento", "Diferença"]:
+                conferencia_exibicao[coluna] = conferencia_exibicao[coluna].apply(format_currency_brl)
+            st.warning("Há diferença entre itens comprados e valor usado no orçamento.")
+            st.dataframe(conferencia_exibicao, use_container_width=True, hide_index=True)
 
         editor_df = df.copy()
         editor_df.insert(0, "Ação", "Manter")
