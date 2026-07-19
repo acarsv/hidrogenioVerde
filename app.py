@@ -6202,14 +6202,20 @@ elif menu == "documentos":
         st.info("Ainda nao ha pedidos com itens para documentos.")
         st.stop()
 
+    def rotulo_pedido_documentos(valor):
+        pedido = pedidos_documentos[pedidos_documentos["pedido_id"] == valor].iloc[0]
+        itens = str(pedido["itens"] or "-").strip()
+        if len(itens) > 90:
+            itens = f"{itens[:87].rstrip()}..."
+        return (
+            f"Pedido #{int(valor)} | Solicitacao {pedido['solicitacoes']} | "
+            f"{pedido['rubricas']} | {itens} | {int(pedido['total_itens'])} item(ns)"
+        )
+
     pedido_doc_id = st.selectbox(
         "Pedido",
         pedidos_documentos["pedido_id"].tolist(),
-        format_func=lambda valor: (
-            f"Pedido #{int(valor)} - "
-            f"{pedidos_documentos.loc[pedidos_documentos.pedido_id == valor, 'solicitacoes'].iloc[0]} - "
-            f"{int(pedidos_documentos.loc[pedidos_documentos.pedido_id == valor, 'total_itens'].iloc[0])} item(ns)"
-        ),
+        format_func=rotulo_pedido_documentos,
         key="documentos_pedido_id",
     )
     pedido_doc = pedidos_documentos[pedidos_documentos["pedido_id"] == pedido_doc_id].iloc[0]
