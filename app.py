@@ -997,6 +997,8 @@ def ensure_financial_governance_schema():
         from solicitacoes_compra s
         where s.id = c.solicitacao_id and c.rubrica_id is null
         """)
+    if not has_column("cotacao_itens", "aceito"):
+        execute("alter table cotacao_itens add column aceito boolean not null default false")
     if not has_column("cotacao_itens", "descricao_item"):
         execute("alter table cotacao_itens add column descricao_item text")
     if not has_column("cotacao_itens", "tipo_item"):
@@ -4732,8 +4734,10 @@ elif menu == "cotacoes":
               coalesce(ci.descricao_item, pi.descricao) as item,
               coalesce(ci.tipo_item, pi.tipo_item) as tipo,
               ci.quantidade,
+              pi.valor_unitario as valor_estimado,
               ci.valor_unitario,
               ci.valor_total,
+              ci.aceito,
               ci.observacoes
             from cotacao_itens ci
             join pedido_itens pi on pi.id = ci.pedido_item_id
@@ -4777,7 +4781,9 @@ elif menu == "cotacoes":
                     "Item": item["item"],
                     "Tipo": item["tipo"],
                     "Quantidade": float(item["quantidade"]),
-                    "Valor unitario": float(item["valor_unitario"]),
+                    "Valor estimado": float(item.get("valor_estimado") or 0),
+                    "Valor empresa": float(item["valor_unitario"]),
+                    "Aceito": bool(item.get("aceito", True)),
                     "Observacoes": item["observacoes"] or "",
                     "Remover": False,
                 })
@@ -4799,15 +4805,28 @@ elif menu == "cotacoes":
             for chave, valor in valores_iniciais.items():
                 if chave not in st.session_state:
                     st.session_state[chave] = valor
-            if f"{prefixo}_valor_total_pedido" not in st.session_state:
-                try:
-                    st.session_state[f"{prefixo}_valor_total_pedido"] = float(cotacao_atual.get("valor_total") or 0)
-                except (TypeError, ValueError):
-                    st.session_state[f"{prefixo}_valor_total_pedido"] = 0.0
             if f"{prefixo}_editor_version" not in st.session_state:
                 st.session_state[f"{prefixo}_editor_version"] = 0
             if not st.session_state.get(f"{prefixo}_loaded"):
                 cotacao_v2_carregar_estado(prefixo, itens_existentes)
+            if not editando_cotacao and not st.session_state[f"{prefixo}_itens"]:
+                st.session_state[f"{prefixo}_itens"] = [
+                    {
+                        "linha_id": f"pedido_{item['id']}",
+                        "pedido_item_id": item["id"],
+                        "solicitacao_id": item["pedido_id"],
+                        "Item": item["descricao"],
+                        "Tipo": item["tipo_item"],
+                        "Quantidade": float(item["quantidade"]),
+                        "Valor estimado": float(item["valor_unitario"] or 0),
+                        "Valor empresa": 0.0,
+                        "Aceito": False,
+                        "Observacoes": "",
+                        "Remover": False,
+                    }
+                    for _, item in pedido_itens.iterrows()
+                ]
+                st.session_state[f"{prefixo}_editor_version"] += 1
 
             st.markdown(f"### {'Editar' if editando_cotacao else 'Criar'} cotação {ordem}")
             st.caption("Altere os dados e salve a edição da cotação existente." if editando_cotacao else "Preencha os dados da empresa, adicione os itens e salve a nova cotação.")
@@ -4815,12 +4834,6 @@ elif menu == "cotacoes":
             cnpj = st.text_input("CNPJ/CPF", key=f"{prefixo}_cnpj", on_change=formatar_cpf_cnpj_session_state, args=(f"{prefixo}_cnpj",))
             contato = st.text_input("Telefone/E-mail", key=f"{prefixo}_contato")
             prazo = st.text_input("Prazo de entrega", key=f"{prefixo}_prazo")
-            valor_total_pedido_input = st.number_input(
-                "Valor total do pedido",
-                min_value=0.0,
-                format="%.2f",
-                key=f"{prefixo}_valor_total_pedido",
-            )
             arquivo = st.file_uploader("Arquivo da cotação para o Google Drive", type=["pdf", "png", "jpg", "jpeg", "doc", "docx", "xls", "xlsx"], key=f"{prefixo}_arquivo")
             arquivo_url = st.text_input("Link da pasta da cotação no Google Drive", key=f"{prefixo}_arquivo_url")
             if str(arquivo_url or "").strip():
@@ -4829,33 +4842,7 @@ elif menu == "cotacoes":
             exibir_arquivos_cotacao(cotacao_atual.get("id"))
 
             st.markdown("### Adicionar item à cotação")
-            adicionar_todos = st.checkbox("Adicionar todos os itens autorizados deste pedido", key=f"{prefixo}_adicionar_todos")
-            if adicionar_todos:
-                itens = list(st.session_state[f"{prefixo}_itens"])
-                itens_ja_adicionados = {str(item["pedido_item_id"]) for item in itens if item.get("pedido_item_id") is not None}
-                novos_itens = []
-                for _, item in pedido_itens.iterrows():
-                    pedido_item_id = item["id"]
-                    if str(pedido_item_id) in itens_ja_adicionados:
-                        continue
-                    novos_itens.append({
-                        "linha_id": f"novo_{len(itens) + len(novos_itens) + 1}_{pedido_item_id}",
-                        "pedido_item_id": pedido_item_id,
-                        "solicitacao_id": item["pedido_id"],
-                        "Item": item["descricao"],
-                        "Tipo": item["tipo_item"],
-                        "Quantidade": float(item["quantidade"]),
-                        "Valor unitario": float(item["valor_unitario"] or 0),
-                        "Observacoes": "",
-                        "Remover": False,
-                    })
-                if novos_itens:
-                    st.session_state[f"{prefixo}_itens"] = itens + novos_itens
-                    st.session_state[f"{prefixo}_editor_version"] += 1
-                    st.success(f"{len(novos_itens)} item(ns) adicionado(s) a cotacao.")
-                    st.rerun()
-                else:
-                    st.info("Todos os itens autorizados deste pedido ja estao na cotacao.")
+            st.caption("Os itens autorizados do pedido são carregados automaticamente na tabela abaixo.")
             tipos_item = ["permanente", "consumo", "servico"]
             origem_item = st.radio(
                 "Origem do item",
@@ -4942,7 +4929,9 @@ elif menu == "cotacoes":
                     "Item": descricao_item.strip(),
                     "Tipo": tipo_item,
                     "Quantidade": float(quantidade),
-                    "Valor unitario": float(valor_unitario),
+                    "Valor estimado": float(valor_unitario_padrao),
+                    "Valor empresa": float(valor_unitario),
+                    "Aceito": False,
                     "Observacoes": observacao_item.strip(),
                     "Remover": False,
                 })
@@ -4952,19 +4941,21 @@ elif menu == "cotacoes":
                 st.rerun()
 
             st.markdown("### Itens da cotação")
-            colunas_editor_cotacao = ["linha_id", "pedido_item_id", "solicitacao_id", "Item", "Tipo", "Quantidade", "Valor unitario", "Observacoes", "Remover"]
+            colunas_editor_cotacao = ["linha_id", "pedido_item_id", "solicitacao_id", "Item", "Tipo", "Quantidade", "Valor estimado", "Valor empresa", "Aceito", "Observacoes", "Remover"]
             itens_editados = st.data_editor(
                 pd.DataFrame(st.session_state[f"{prefixo}_itens"], columns=colunas_editor_cotacao),
                 use_container_width=True,
                 hide_index=True,
-                disabled=["linha_id", "pedido_item_id", "solicitacao_id"],
+                disabled=["linha_id", "pedido_item_id", "solicitacao_id", "Item", "Tipo", "Quantidade", "Valor estimado"],
                 column_config={
                     "linha_id": None,
                     "pedido_item_id": None,
                     "solicitacao_id": None,
                     "Tipo": st.column_config.SelectboxColumn("Tipo", options=tipos_item, required=True),
                     "Quantidade": st.column_config.NumberColumn("Quantidade", min_value=0.01, format="%.2f"),
-                    "Valor unitario": st.column_config.NumberColumn("Valor unitário", min_value=0.0, format="R$ %.2f"),
+                    "Valor estimado": st.column_config.NumberColumn("Valor estimado", min_value=0.0, format="R$ %.2f"),
+                    "Valor empresa": st.column_config.NumberColumn("Novo valor da empresa", min_value=0.0, format="R$ %.2f", required=True),
+                    "Aceito": st.column_config.CheckboxColumn("Aceitar", required=True),
                     "Remover": st.column_config.CheckboxColumn("Remover"),
                 },
                 key=f"{prefixo}_editor_{st.session_state[f'{prefixo}_editor_version']}",
@@ -4978,23 +4969,21 @@ elif menu == "cotacoes":
                 itens_editados = pd.DataFrame(columns=colunas_editor_cotacao)
             st.session_state[f"{prefixo}_itens"] = itens_editados.to_dict("records")
             itens_editados["Quantidade"] = pd.to_numeric(itens_editados["Quantidade"], errors="coerce").fillna(0)
-            itens_editados["Valor unitario numerico"] = pd.to_numeric(itens_editados["Valor unitario"], errors="coerce").fillna(0)
+            itens_editados["Valor unitario numerico"] = pd.to_numeric(itens_editados["Valor empresa"], errors="coerce").fillna(0)
             itens_editados = itens_editados[itens_editados["Remover"] != True].copy()
             itens_editados["Valor total"] = itens_editados["Quantidade"].apply(lambda valor: Decimal(str(valor))) * itens_editados["Valor unitario numerico"].apply(lambda valor: Decimal(str(valor)))
             valor_total_itens = Decimal(str(itens_editados["Valor total"].sum())) if len(itens_editados) else Decimal("0")
-            valor_total_informado = Decimal(str(valor_total_pedido_input or 0))
-            valor_total = valor_total_informado if valor_total_informado > 0 else valor_total_itens
+            valor_total = valor_total_itens
             if len(itens_editados):
-                resumo = itens_editados[["Item", "Tipo", "Quantidade", "Valor unitario", "Valor total", "Observacoes"]].copy()
-                resumo["Valor unitario"] = resumo["Valor unitario"].apply(format_currency_brl)
+                resumo = itens_editados[["Item", "Tipo", "Quantidade", "Valor estimado", "Valor empresa", "Aceito", "Valor total", "Observacoes"]].copy()
+                resumo["Valor estimado"] = resumo["Valor estimado"].apply(format_currency_brl)
+                resumo["Valor empresa"] = resumo["Valor empresa"].apply(format_currency_brl)
                 resumo["Valor total"] = resumo["Valor total"].apply(format_currency_brl)
-                resumo = resumo.rename(columns={"Valor unitario": "Valor unitário", "Observacoes": "Observações"})
+                resumo = resumo.rename(columns={"Valor empresa": "Valor da empresa", "Observacoes": "Observações"})
                 st.dataframe(resumo, use_container_width=True, hide_index=True)
             else:
                 st.info("Nenhum item adicionado.")
             st.metric("Valor total da cotação", format_currency_brl(valor_total))
-            if valor_total_informado > 0 and valor_total_informado != valor_total_itens:
-                st.caption(f"Soma dos itens: {format_currency_brl(valor_total_itens)}")
 
             texto_botao_salvar = "Salvar edição da cotação" if editando_cotacao else "Criar cotação"
             def valor_ausente(valor):
@@ -5027,6 +5016,10 @@ elif menu == "cotacoes":
                     st.error("Todos os itens devem ter quantidade maior que zero.")
                 elif (itens_editados["Valor unitario numerico"] < 0).any():
                     st.error("Todos os valores unitários devem ser maiores ou iguais a zero.")
+                elif (itens_editados["Valor unitario numerico"] <= 0).any():
+                    st.error("Informe o novo valor da empresa para todos os itens.")
+                elif not itens_editados["Aceito"].fillna(False).all():
+                    st.error("Marque Aceitar em todos os itens conferidos antes de salvar a cotação.")
                 elif arquivo is None and not str(arquivo_url or "").strip():
                     st.error("Anexe o arquivo da cotação ou informe o link no Google Drive.")
                 else:
@@ -5149,9 +5142,9 @@ elif menu == "cotacoes":
                     execute("delete from cotacao_itens where cotacao_id=%s", (cotacao_id,))
                     for _, item in itens_editados.iterrows():
                         execute("""
-                        insert into cotacao_itens (cotacao_id, pedido_item_id, descricao_item, tipo_item, quantidade, valor_unitario, observacoes)
-                        values (%s,%s,%s,%s,%s,%s,%s)
-                        """, (cotacao_id, item["pedido_item_id"], str(item.get("Item") or "").strip() or None, str(item.get("Tipo") or "").strip() or None, Decimal(str(item["Quantidade"])), Decimal(str(item["Valor unitario numerico"])), str(item.get("Observacoes") or "").strip() or None))
+                        insert into cotacao_itens (cotacao_id, pedido_item_id, descricao_item, tipo_item, quantidade, valor_unitario, aceito, observacoes)
+                        values (%s,%s,%s,%s,%s,%s,%s,%s)
+                        """, (cotacao_id, item["pedido_item_id"], str(item.get("Item") or "").strip() or None, str(item.get("Tipo") or "").strip() or None, Decimal(str(item["Quantidade"])), Decimal(str(item["Valor unitario numerico"])), bool(item.get("Aceito")), str(item.get("Observacoes") or "").strip() or None))
                     solicitacoes_cotadas = set(pedido_itens[pedido_itens["id"].isin(itens_editados["pedido_item_id"])]["pedido_id"].dropna().unique().tolist())
                     solicitacoes_cotadas.update(
                         int(valor)
