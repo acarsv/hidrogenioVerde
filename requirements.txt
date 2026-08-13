@@ -1,4 +1,5 @@
 streamlit
+streamlit-cookies-controller==0.0.4
 psycopg2-binary
 pandas
 bcrypt
