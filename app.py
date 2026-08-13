@@ -2997,6 +2997,42 @@ def atualizar_valores_itens_cotacao(cotacao_id, itens_editados):
     sincronizar_orcamento()
 
 
+def ajustar_itens_ao_total_cotacao(itens, valor_total_cotacao):
+    itens_ajustados = itens.copy()
+    if len(itens_ajustados) == 0:
+        return itens_ajustados
+
+    quantidades = pd.to_numeric(itens_ajustados["Quantidade"], errors="coerce").fillna(0)
+    valores_unitarios = pd.to_numeric(itens_ajustados["Valor unitario"], errors="coerce").fillna(0)
+    subtotais = quantidades * valores_unitarios
+    subtotal_atual = Decimal(str(subtotais.sum())).quantize(CENTAVO, rounding=ROUND_HALF_UP)
+    total_oficial = Decimal(str(valor_total_cotacao or 0)).quantize(CENTAVO, rounding=ROUND_HALF_UP)
+    if subtotal_atual <= 0 or total_oficial <= 0 or subtotal_atual == total_oficial:
+        return itens_ajustados
+
+    total_centavos = int(total_oficial * 100)
+    pesos = [Decimal(str(valor)) for valor in subtotais.tolist()]
+    cotas = [Decimal(total_centavos) * peso / subtotal_atual for peso in pesos]
+    centavos_por_item = [int(cota) for cota in cotas]
+    centavos_restantes = total_centavos - sum(centavos_por_item)
+    ordem_restos = sorted(
+        range(len(cotas)),
+        key=lambda indice: cotas[indice] - Decimal(centavos_por_item[indice]),
+        reverse=True,
+    )
+    for indice in ordem_restos[:centavos_restantes]:
+        centavos_por_item[indice] += 1
+
+    for posicao, indice in enumerate(itens_ajustados.index):
+        quantidade = Decimal(str(quantidades.loc[indice] or 0))
+        if quantidade > 0:
+            total_item = Decimal(centavos_por_item[posicao]) / Decimal("100")
+            itens_ajustados.at[indice, "Valor unitario"] = float(
+                (total_item / quantidade).quantize(CENTAVO, rounding=ROUND_HALF_UP)
+            )
+    return itens_ajustados
+
+
 @st.dialog("Editar nota fiscal")
 def editar_numero_arquivo_nf_dialog(rubrica_id, solicitacao_id=None):
     filtro_solicitacao = ""
@@ -5398,6 +5434,16 @@ elif menu == "compra_nota":
     })
     itens_cotacao_editor["Quantidade"] = pd.to_numeric(itens_cotacao_editor["Quantidade"], errors="coerce").fillna(0.0)
     itens_cotacao_editor["Valor unitario"] = pd.to_numeric(itens_cotacao_editor["Valor unitario"], errors="coerce").fillna(0.0)
+    valor_total_cotacao_selecionada = Decimal(str(
+        cotacoes_resumo.loc[cotacoes_resumo.id == cotacao_vencedora_id, "valor_total"].iloc[0]
+    )).quantize(CENTAVO, rounding=ROUND_HALF_UP)
+    subtotal_itens_original = Decimal(str(
+        (itens_cotacao_editor["Quantidade"] * itens_cotacao_editor["Valor unitario"]).sum()
+    )).quantize(CENTAVO, rounding=ROUND_HALF_UP)
+    itens_cotacao_editor = ajustar_itens_ao_total_cotacao(
+        itens_cotacao_editor,
+        valor_total_cotacao_selecionada,
+    )
     itens_cotacao_editor = st.data_editor(
         itens_cotacao_editor,
         use_container_width=True,
@@ -5412,8 +5458,12 @@ elif menu == "compra_nota":
     itens_cotacao_editor["Quantidade"] = pd.to_numeric(itens_cotacao_editor["Quantidade"], errors="coerce").fillna(0.0)
     itens_cotacao_editor["Valor unitario"] = pd.to_numeric(itens_cotacao_editor["Valor unitario"], errors="coerce").fillna(0.0)
     itens_cotacao_editor["Valor total"] = itens_cotacao_editor["Quantidade"] * itens_cotacao_editor["Valor unitario"]
-    total_proposta_editado = Decimal(str(itens_cotacao_editor["Valor total"].sum())).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if len(itens_cotacao_editor) else Decimal("0")
-    st.metric("Total da proposta selecionada", format_currency_brl(total_proposta_editado))
+    st.metric("Total oficial da proposta selecionada", format_currency_brl(valor_total_cotacao_selecionada))
+    if subtotal_itens_original != valor_total_cotacao_selecionada:
+        st.caption(
+            f"Os valores dos itens foram ajustados proporcionalmente de {format_currency_brl(subtotal_itens_original)} "
+            f"para coincidir com o total oficial da cotação: {format_currency_brl(valor_total_cotacao_selecionada)}."
+        )
     if st.button("Salvar valores dos itens", key=f"salvar_valores_itens_cotacao_{sid}_{cotacao_vencedora_id}"):
         try:
             atualizar_valores_itens_cotacao(int(cotacao_vencedora_id), itens_cotacao_editor)
@@ -5473,6 +5523,7 @@ elif menu == "compra_nota":
         if len(itens_cotacao_selecionada) == 0:
             st.error("A cotação selecionada não tem itens vinculados.")
         else:
+            atualizar_valores_itens_cotacao(int(cotacao_vencedora_id), itens_cotacao_editor)
             execute("""
             update cotacao_itens ci
             set vencedor=false
