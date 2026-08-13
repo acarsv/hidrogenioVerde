@@ -1726,6 +1726,27 @@ def excede_saldo_disponivel(rubrica_id: int, valor: Decimal) -> tuple[bool, Deci
     saldo = Decimal(str(saldo_df.iloc[0]["saldo_disponivel"])) if len(saldo_df) == 1 else Decimal("0")
     return valor > saldo, saldo
 
+def saldo_para_compra_pedido(pedido_id: int, rubrica_id: int) -> Decimal:
+    saldo_df = query("""
+    with solicitacoes_pedido as (
+      select distinct s.id, coalesce(s.valor_estimado, 0) as valor_estimado
+      from pedido_itens pi
+      join solicitacoes_compra s on s.id = pi.pedido_id
+      left join pedidos p on p.solicitacao_id = s.id
+      where coalesce(pi.pedido_manual_id, p.id, s.id)=%s
+        and pi.rubrica_id=%s
+    )
+    select
+      v.saldo_disponivel + coalesce(sum(sp.valor_estimado), 0) as saldo_para_compra
+    from vw_orcamento v
+    left join solicitacoes_pedido sp on true
+    where v.id=%s
+    group by v.saldo_disponivel
+    """, (pedido_id, rubrica_id, rubrica_id))
+    if len(saldo_df) != 1:
+        return Decimal("0")
+    return max(Decimal(str(saldo_df.iloc[0]["saldo_para_compra"] or 0)), Decimal("0"))
+
 CENTAVO = Decimal("0.01")
 
 def arredondar_centavos(valor):
@@ -4035,18 +4056,10 @@ elif menu == "nova_exigencia":
         st.rerun()
 
     if col_finalizar.button("Finalizar e enviar para solicitacao", type="primary", use_container_width=True):
-        valor_estimado_decimal = Decimal(str(valor_estimado))
-        excede_saldo, saldo_disponivel = excede_saldo_disponivel(rubrica_id, valor_estimado_decimal)
         if len(itens_validos) == 0:
             st.error("Informe pelo menos um item do pedido.")
         elif (itens_validos["quantidade"] <= 0).any():
             st.error("Todos os itens devem ter quantidade maior que zero.")
-        elif excede_saldo:
-            st.error(
-                "Pedido nao enviado. "
-                f"O valor total ({format_currency_brl_markdown(valor_estimado_decimal)}) "
-                f"supera o disponivel operacional da rubrica ({format_currency_brl_markdown(saldo_disponivel)})."
-            )
         else:
             salvar_pedido_rascunho()
             descricao_pedido = descricao.strip() or "; ".join(itens_validos["descricao"].astype(str).tolist())[:500]
@@ -4164,18 +4177,10 @@ elif menu == "nova_exigencia":
     st.metric("Valor total estimado", format_currency_brl(valor_estimado))
     justificativa = st.text_area("Justificativa", key=f"nova_justificativa_{form_version}")
     if st.button("Enviar solicitação", key=f"nova_enviar_{form_version}"):
-        valor_estimado_decimal = Decimal(str(valor_estimado))
-        excede_saldo, saldo_disponivel = excede_saldo_disponivel(rubrica_id, valor_estimado_decimal)
         if len(itens_validos) == 0:
             st.error("Informe pelo menos um item do pedido.")
         elif (itens_validos["quantidade"] <= 0).any():
             st.error("Todos os itens devem ter quantidade maior que zero.")
-        elif excede_saldo:
-            st.error(
-                "Solicitação não registrada. "
-                f"O valor total ({format_currency_brl_markdown(valor_estimado_decimal)}) "
-                f"supera o disponível operacional da rubrica ({format_currency_brl_markdown(saldo_disponivel)})."
-            )
         else:
             descricao_pedido = descricao.strip() or "; ".join(itens_validos["descricao"].astype(str).tolist())[:500]
             solicitacao_criada = query("""
@@ -4267,33 +4272,6 @@ elif menu == "solicitacoes":
         elif any(valor_estimado < 0 for _, _, valor_estimado, _, _ in alteracoes):
             st.error("O valor estimado nao pode ser negativo.")
         else:
-            erro_autorizacao = None
-            for solicitacao_id, valor_estimado in alteracoes_autorizacao:
-                solicitacao = query("""
-                select id, rubrica_id, coalesce(valor_estimado, 0) as valor_estimado, autorizado
-                from solicitacoes_compra
-                where id=%s
-                """, (solicitacao_id,))
-                if len(solicitacao) != 1:
-                    erro_autorizacao = f"Solicitacao #{solicitacao_id} nao encontrada."
-                    break
-                rubrica_autorizacao_id = int(solicitacao.iloc[0]["rubrica_id"])
-                saldo_df = query("select saldo_disponivel from vw_orcamento where id=%s", (rubrica_autorizacao_id,))
-                saldo_disponivel = Decimal(str(saldo_df.iloc[0]["saldo_disponivel"])) if len(saldo_df) == 1 else Decimal("0")
-                valor_atual_banco = Decimal(str(solicitacao.iloc[0]["valor_estimado"]))
-                saldo_disponivel_para_autorizacao = saldo_disponivel + valor_atual_banco
-                if Decimal(str(valor_estimado)) > saldo_disponivel_para_autorizacao:
-                    erro_autorizacao = (
-                        f"Solicitacao #{solicitacao_id} nao autorizada. "
-                        f"O valor estimado ({format_currency_brl_markdown(valor_estimado)}) "
-                        f"supera o disponivel operacional da rubrica ({format_currency_brl_markdown(saldo_disponivel_para_autorizacao)})."
-                    )
-                    break
-
-            if erro_autorizacao:
-                st.error(erro_autorizacao)
-                st.stop()
-
             for solicitacao_id, quantidade, valor_estimado, quantidade_original, valor_original in alteracoes:
                 execute("""
                 update solicitacoes_compra
@@ -4351,23 +4329,11 @@ elif menu == "solicitacoes":
                 if len(existe) != 1:
                     st.error("Solicitação não encontrada.")
                 elif not bool(existe.iloc[0]["autorizado"]):
-                    valor_autorizacao = Decimal(str(existe.iloc[0]["valor_estimado"]))
-                    rubrica_autorizacao_id = int(existe.iloc[0]["rubrica_id"])
-                    saldo_df = query("select saldo_disponivel from vw_orcamento where id=%s", (rubrica_autorizacao_id,))
-                    saldo_disponivel = Decimal(str(saldo_df.iloc[0]["saldo_disponivel"])) if len(saldo_df) == 1 else Decimal("0")
-                    saldo_disponivel_para_autorizacao = saldo_disponivel + valor_autorizacao
-                    if valor_autorizacao > saldo_disponivel_para_autorizacao:
-                        st.error(
-                            "Solicitação não autorizada. "
-                            f"O valor estimado ({format_currency_brl_markdown(valor_autorizacao)}) "
-                            f"supera o disponível operacional da rubrica ({format_currency_brl_markdown(saldo_disponivel_para_autorizacao)})."
-                        )
-                    else:
-                        execute("update solicitacoes_compra set autorizado=true, gerente_id=%s, autorizado_em=now(), status='em_andamento' where id=%s", (user["id"], sid))
-                        execute("insert into historico_status (solicitacao_id,status_novo,usuario_id,observacao) values (%s,'em_andamento',%s,'Autorizada pelo gerente')", (sid, user["id"]))
-                        sincronizar_orcamento()
-                        st.success("Solicitação autorizada.")
-                        st.rerun()
+                    execute("update solicitacoes_compra set autorizado=true, gerente_id=%s, autorizado_em=now(), status='em_andamento' where id=%s", (user["id"], sid))
+                    execute("insert into historico_status (solicitacao_id,status_novo,usuario_id,observacao) values (%s,'em_andamento',%s,'Autorizada pelo gerente')", (sid, user["id"]))
+                    sincronizar_orcamento()
+                    st.success("Solicitação autorizada. A suficiência do saldo será conferida pela menor cotação antes da compra.")
+                    st.rerun()
                 else:
                     st.info("Esta solicitação já estava autorizada.")
             if st.button("Cancelar solicitação"):
@@ -5220,6 +5186,21 @@ elif menu == "cotacoes":
             resumo_cotacoes["Valor total"] = resumo_cotacoes["Valor total"].apply(format_currency_brl)
             st.markdown("### Cotações cadastradas")
             st.dataframe(resumo_cotacoes, use_container_width=True, hide_index=True, column_config={"Link": st.column_config.LinkColumn("Link")})
+            menor_cotacao = Decimal(str(cotacoes_salvas_v2["valor_total"].min() or 0))
+            saldo_para_compra = saldo_para_compra_pedido(int(sid), rubrica_id)
+            valor_a_remanejar = max(menor_cotacao - saldo_para_compra, Decimal("0"))
+            if valor_a_remanejar > 0:
+                st.warning(
+                    f"Menor cotação: {format_currency_brl_markdown(menor_cotacao)}. "
+                    f"Saldo disponível para esta compra: {format_currency_brl_markdown(saldo_para_compra)}. "
+                    f"Remaneje {format_currency_brl_markdown(valor_a_remanejar)} para "
+                    f"{pedido_atual['rubrica_codigo']} antes de registrar a compra."
+                )
+            else:
+                st.success(
+                    f"A menor cotação ({format_currency_brl_markdown(menor_cotacao)}) "
+                    "está coberta pelo saldo da rubrica."
+                )
 
         st.stop()
 
@@ -5356,6 +5337,20 @@ elif menu == "compra_nota":
             f"Ainda faltam {3 - total_propostas_recebidas} cotação(ões) complementar(es); "
             "a pendência ficará sinalizada na auditoria até o cadastro das demais propostas."
         )
+    menor_cotacao = Decimal(str(cotacoes_resumo["valor_total"].min() or 0))
+    saldo_para_compra = saldo_para_compra_pedido(int(pedido_compra_id), rubrica_compra_id)
+    valor_a_remanejar_menor_cotacao = max(menor_cotacao - saldo_para_compra, Decimal("0"))
+    if valor_a_remanejar_menor_cotacao > 0:
+        st.warning(
+            f"A menor cotação é {format_currency_brl_markdown(menor_cotacao)}. "
+            f"Remaneje {format_currency_brl_markdown(valor_a_remanejar_menor_cotacao)} para "
+            f"{pedido_compra['rubrica_codigo']} antes de registrar a compra."
+        )
+    else:
+        st.success(
+            f"A menor cotação ({format_currency_brl_markdown(menor_cotacao)}) "
+            "está coberta pelo saldo da rubrica."
+        )
     cotacoes_resumo_exibicao = cotacoes_resumo.copy()
     cotacoes_resumo_exibicao["valor_total"] = cotacoes_resumo_exibicao["valor_total"].apply(format_currency_brl)
     st.dataframe(
@@ -5463,6 +5458,18 @@ elif menu == "compra_nota":
             )
 
     if st.button("Registrar compra"):
+        valor_cotacao_selecionada = Decimal(str(
+            cotacoes_resumo.loc[cotacoes_resumo.id == cotacao_vencedora_id, "valor_total"].iloc[0]
+        ))
+        saldo_para_compra_atual = saldo_para_compra_pedido(int(pedido_compra_id), rubrica_compra_id)
+        if valor_cotacao_selecionada > saldo_para_compra_atual:
+            valor_a_remanejar = valor_cotacao_selecionada - saldo_para_compra_atual
+            st.error(
+                "Compra ainda não registrada. "
+                f"Remaneje {format_currency_brl_markdown(valor_a_remanejar)} para "
+                f"{pedido_compra['rubrica_codigo']} para cobrir a cotação selecionada."
+            )
+            st.stop()
         if len(itens_cotacao_selecionada) == 0:
             st.error("A cotação selecionada não tem itens vinculados.")
         else:
