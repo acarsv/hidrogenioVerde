@@ -3323,9 +3323,11 @@ if menu == "orcamento":
     order by criado_em, remanejamento_id
     """)
     remanejamentos_por_rubrica = {str(codigo): [] for codigo in df["codigo"]}
+    saldo_remanejado_por_rubrica = {str(codigo): Decimal("0") for codigo in df["codigo"]}
     for _, remanejamento in remanejamentos_ativos.iterrows():
         origem_codigo = str(remanejamento["origem_codigo"])
         destino_codigo = str(remanejamento["destino_codigo"])
+        valor_remanejado = Decimal(str(remanejamento["valor"] or 0))
         valor_formatado = format_currency_brl(remanejamento["valor"])
         remanejamentos_por_rubrica.setdefault(origem_codigo, []).append(
             f"− {valor_formatado} → {destino_codigo}"
@@ -3333,8 +3335,19 @@ if menu == "orcamento":
         remanejamentos_por_rubrica.setdefault(destino_codigo, []).append(
             f"+ {valor_formatado} ← {origem_codigo}"
         )
+        saldo_remanejado_por_rubrica[origem_codigo] = (
+            saldo_remanejado_por_rubrica.get(origem_codigo, Decimal("0")) + valor_remanejado
+        )
+        saldo_remanejado_por_rubrica[destino_codigo] = (
+            saldo_remanejado_por_rubrica.get(destino_codigo, Decimal("0")) - valor_remanejado
+        )
     df["remanejamento"] = df["codigo"].astype(str).map(
         lambda codigo: " | ".join(remanejamentos_por_rubrica.get(codigo, [])) or "—"
+    )
+    df["valor_inicial_projeto"] = df.apply(
+        lambda rubrica: Decimal(str(rubrica["valor_orcado"] or 0))
+        + saldo_remanejado_por_rubrica.get(str(rubrica["codigo"]), Decimal("0")),
+        axis=1,
     )
 
     df["status_financeiro"] = df.apply(financial_status, axis=1)
@@ -3524,6 +3537,7 @@ if menu == "orcamento":
         "nome": "Rubrica",
         "responsaveis": "Responsável",
         "tipo": "Tipo",
+        "valor_inicial_projeto": "Valor inicial do projeto",
         "valor_orcado": "Valor orçado",
         "remanejamento": "Remanejamento",
         "valor_reservado": "Valor reservado",
@@ -3554,6 +3568,7 @@ if menu == "orcamento":
         .clip(lower=0)
     )
     for coluna in [
+        "Valor inicial do projeto",
         "Valor orçado",
         "Valor reservado",
         "Valor utilizado",
@@ -3574,6 +3589,7 @@ if menu == "orcamento":
     colunas_orcamento = [
         "Código",
         "Rubrica",
+        "Valor inicial do projeto",
         "Valor orçado",
         "Remanejamento",
         "Valor utilizado",
