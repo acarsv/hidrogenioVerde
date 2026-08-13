@@ -1119,6 +1119,56 @@ def ensure_financial_governance_schema():
         execute("alter table movimentacoes_orcamento add column estornado_por uuid references usuarios_app(id)")
 
     execute("""
+    do $$
+    declare
+      remanejamento record;
+      valor_informado numeric(14,2);
+      diferenca numeric(14,2);
+    begin
+      for remanejamento in
+        select
+          saida.remanejamento_id,
+          saida.rubrica_id as origem_id,
+          entrada.rubrica_id as destino_id,
+          saida.valor as valor_registrado,
+          substring(
+            saida.justificativa
+            from 'Valor total informado: R\$ ([0-9.]+,[0-9]{2})'
+          ) as valor_informado_texto
+        from movimentacoes_orcamento saida
+        join movimentacoes_orcamento entrada
+          on entrada.remanejamento_id = saida.remanejamento_id
+         and entrada.operacao = 'remanejamento_entrada'
+        where saida.operacao = 'remanejamento_saida'
+          and saida.remanejamento_id is not null
+          and saida.estornado_em is null
+          and entrada.estornado_em is null
+      loop
+        if remanejamento.valor_informado_texto is not null then
+          valor_informado := replace(
+            replace(remanejamento.valor_informado_texto, '.', ''), ',', '.'
+          )::numeric(14,2);
+          diferenca := remanejamento.valor_registrado - valor_informado;
+          if diferenca <> 0 then
+            update rubricas
+            set valor_orcado = valor_orcado + diferenca
+            where id = remanejamento.origem_id;
+
+            update rubricas
+            set valor_orcado = valor_orcado - diferenca
+            where id = remanejamento.destino_id;
+
+            update movimentacoes_orcamento movimento
+            set valor = valor_informado
+            where movimento.remanejamento_id = remanejamento.remanejamento_id
+              and movimento.operacao in ('remanejamento_saida', 'remanejamento_entrada');
+          end if;
+        end if;
+      end loop;
+    end $$
+    """)
+
+    execute("""
     create or replace view vw_historico_remanejamentos as
     select
       saida.remanejamento_id,
@@ -1128,7 +1178,18 @@ def ensure_financial_governance_schema():
       origem.nome as origem_nome,
       destino.codigo as destino_codigo,
       destino.nome as destino_nome,
-      saida.valor,
+      coalesce(
+        replace(
+          replace(
+            substring(saida.justificativa from 'Valor total informado: R\$ ([0-9.]+,[0-9]{2})'),
+            '.',
+            ''
+          ),
+          ',',
+          '.'
+        )::numeric(14,2),
+        saida.valor
+      ) as valor,
       saida.justificativa,
       case
         when saida.estornado_em is not null or entrada.estornado_em is not null then 'estornado'
@@ -1420,6 +1481,15 @@ def format_currency_brl(valor) -> str:
 
 def format_currency_brl_markdown(valor) -> str:
     return format_currency_brl(valor).replace("$", r"\$")
+
+def valor_informado_remanejamento(justificativa, valor_registrado) -> Decimal:
+    correspondencia = re.search(
+        r"Valor total informado:\s*R\$\s*([\d.]+,\d{2})",
+        str(justificativa or ""),
+    )
+    if correspondencia:
+        return Decimal(correspondencia.group(1).replace(".", "").replace(",", "."))
+    return Decimal(str(valor_registrado or 0))
 
 def apenas_digitos(valor) -> str:
     return re.sub(r"\D", "", str(valor or ""))
@@ -2057,22 +2127,21 @@ def remanejar_saldo_dialog(usuario_id):
         rubrica = rubricas.loc[rubricas.id == item_id].iloc[0]
         return (
             f"{rubrica['codigo']} - {rubrica['nome']} "
-            f"({format_currency_brl(rubrica['saldo_disponivel'])}) "
-            f"(+ {format_currency_brl(rubrica['reserva_tecnica'])})"
+            f"({format_currency_brl(rubrica['saldo_disponivel'])} disponível)"
         )
 
     origem_id = st.selectbox("Rubrica origem", rubricas["id"].tolist(), format_func=label_rubrica)
     destino_id = st.selectbox("Rubrica destino", rubricas["id"].tolist(), format_func=label_rubrica)
     rubrica_origem = rubricas.loc[rubricas.id == origem_id].iloc[0]
     saldo_origem = Decimal(str(rubrica_origem["saldo_disponivel"]))
-    reserva_origem = Decimal(str(rubrica_origem["reserva_tecnica"]))
-    disponivel_total_origem = Decimal(str(rubrica_origem["disponivel_total"]))
-    valor_maximo = float(max(disponivel_total_origem, Decimal("0.01")))
+    if saldo_origem <= 0:
+        st.info("A rubrica de origem não possui saldo operacional disponível para remanejamento.")
+        return
+    valor_maximo = float(saldo_origem)
     valor = st.number_input("Valor total a remanejar", min_value=0.01, max_value=valor_maximo, value=0.01, step=100.0)
     st.caption(
-        f"Disponível operacional: {format_currency_brl(saldo_origem)} | "
-        f"Reserva técnica disponível: {format_currency_brl(reserva_origem)} | "
-        f"Total disponível para remanejamento: {format_currency_brl(disponivel_total_origem)}."
+        f"Disponível para remanejamento: {format_currency_brl(saldo_origem)}. "
+        "A reserva técnica não será incluída no valor movimentado."
     )
     justificativa = st.text_area("Justificativa formal")
 
@@ -2081,26 +2150,16 @@ def remanejar_saldo_dialog(usuario_id):
         valor_decimal = Decimal(str(valor))
         if origem_id == destino_id:
             st.error("A rubrica de origem deve ser diferente da rubrica de destino.")
-        elif valor_decimal > disponivel_total_origem:
-            st.error("O valor informado supera o total disponível da rubrica de origem.")
+        elif valor_decimal > saldo_origem:
+            st.error("O valor informado supera o saldo operacional disponível da rubrica de origem.")
         elif not justificativa.strip():
             st.error("Informe uma justificativa para auditoria.")
         else:
             remanejamento_id = str(uuid4())
-            if valor_decimal <= saldo_origem:
-                valor_orcado_movimentado = valor_orcado_para_reduzir_saldo_operacional(
-                    valor_decimal,
-                    rubrica_origem["valor_orcado"],
-                    rubrica_origem["reserva_tecnica_percentual"],
-                    rubrica_origem["saldo_disponivel"],
-                    rubrica_origem["valor_reservado"],
-                    rubrica_origem["valor_utilizado"],
-                )
-            else:
-                valor_orcado_movimentado = valor_decimal
+            valor_orcado_movimentado = valor_decimal
             justificativa_auditoria = (
                 f"{justificativa.strip()} | Valor total informado: {format_currency_brl(valor_decimal)}. "
-                f"Valor orçado movimentado com reserva técnica: {format_currency_brl(valor_orcado_movimentado)}."
+                "Remanejamento realizado sem incluir a reserva técnica."
             )
             execute("update rubricas set valor_orcado = valor_orcado - %s where id = %s", (valor_orcado_movimentado, int(origem_id)))
             execute("update rubricas set valor_orcado = valor_orcado + %s where id = %s", (valor_orcado_movimentado, int(destino_id)))
@@ -3317,7 +3376,8 @@ if menu == "orcamento":
     select
       origem_codigo,
       destino_codigo,
-      valor
+      valor,
+      justificativa
     from vw_historico_remanejamentos
     where status = 'ativo'
     order by criado_em, remanejamento_id
@@ -3328,7 +3388,11 @@ if menu == "orcamento":
         origem_codigo = str(remanejamento["origem_codigo"])
         destino_codigo = str(remanejamento["destino_codigo"])
         valor_remanejado = Decimal(str(remanejamento["valor"] or 0))
-        valor_formatado = format_currency_brl(remanejamento["valor"])
+        valor_exibido = valor_informado_remanejamento(
+            remanejamento.get("justificativa"),
+            remanejamento["valor"],
+        )
+        valor_formatado = format_currency_brl(valor_exibido)
         remanejamentos_por_rubrica.setdefault(origem_codigo, []).append(
             f"− {valor_formatado} → {destino_codigo}"
         )
