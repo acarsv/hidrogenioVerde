@@ -3863,7 +3863,16 @@ elif menu == "nova_exigencia":
     if len(rubricas) == 0:
         st.info("Não há rubricas abertas para novas solicitações.")
         st.stop()
-    rubrica_label = st.selectbox("Rubrica/categoria", rubricas["label"])
+    rubrica_label = st.selectbox(
+        "Rubrica/categoria *",
+        [None] + rubricas["label"].tolist(),
+        index=0,
+        format_func=lambda valor: "Selecione uma rubrica" if valor is None else valor,
+        placeholder="Selecione uma rubrica",
+    )
+    if rubrica_label is None:
+        st.info("Selecione a rubrica para criar ou continuar um pedido.")
+        st.stop()
     rubrica_id = int(rubricas.loc[rubricas["label"] == rubrica_label, "id"].iloc[0])
     tipo_rubrica = rubricas.loc[rubricas["label"] == rubrica_label, "tipo"].iloc[0]
     tipo_item_padrao = {
