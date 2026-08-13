@@ -2969,13 +2969,13 @@ def atualizar_valores_itens_cotacao(cotacao_id, itens_editados):
     if len(itens_editados) == 0:
         raise ValueError("Nao ha itens para atualizar.")
 
-    ids_itens = [int(valor) for valor in itens_editados["id"].dropna().tolist()]
+    ids_itens = [str(valor) for valor in itens_editados["id"].dropna().tolist()]
     if not ids_itens:
         raise ValueError("Nao ha itens validos para atualizar.")
 
     valores_por_item = {}
     for _, item in itens_editados.iterrows():
-        item_id = int(item["id"])
+        item_id = str(item["id"])
         valor_unitario = Decimal(str(item["Valor unitario"])).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         if valor_unitario < 0:
             raise ValueError("Valor unitario nao pode ser negativo.")
@@ -2989,10 +2989,10 @@ def atualizar_valores_itens_cotacao(cotacao_id, itens_editados):
             cur.execute("""
             select id, pedido_item_id
             from cotacao_itens
-            where cotacao_id=%s and id = any(%s)
+            where cotacao_id=%s and id = any(%s::uuid[])
             """, (int(cotacao_id), ids_itens))
             itens_banco = cur.fetchall()
-            ids_banco = {int(row["id"]) for row in itens_banco}
+            ids_banco = {str(row["id"]) for row in itens_banco}
             if ids_banco != set(ids_itens):
                 raise ValueError("Um ou mais itens nao pertencem a cotacao selecionada.")
 
