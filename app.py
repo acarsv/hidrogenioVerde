@@ -2,15 +2,18 @@ import os
 import mimetypes
 import re
 import json
+import hashlib
+import secrets
 from uuid import uuid4
 from io import BytesIO
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import bcrypt
 import pandas as pd
 import psycopg2
 import psycopg2.extras
 import streamlit as st
+from streamlit_cookies_controller import CookieController
 from dotenv import load_dotenv
 from urllib.parse import urlparse
 from ia_operacional import (
@@ -23,6 +26,8 @@ from ia_operacional import (
 
 load_dotenv(override=True)
 st.set_page_config(page_title="Hidrogênio Verde - Compras", layout="wide")
+cookie_controller = CookieController(key="hidrogenioverde_cookies")
+COOKIE_SESSAO = "hidrogenioverde_sessao"
 APP_DEPLOY_VERSION = "2026-05-11.10"
 PERIODO_PRESTACAO_INICIO = date(2026, 3, 1)
 PERIODO_PRESTACAO_FIM = date(2027, 3, 31)
@@ -70,6 +75,38 @@ def query(sql, params=None):
         raise
     finally:
         conn.close()
+
+def hash_token_sessao(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+def criar_sessao_persistente(usuario_id) -> str:
+    token = secrets.token_urlsafe(48)
+    execute("""
+    insert into sessoes_app (usuario_id, token_hash)
+    values (%s,%s)
+    """, (usuario_id, hash_token_sessao(token)))
+    return token
+
+def usuario_da_sessao_persistente(token):
+    if not token:
+        return None
+    usuarios = query("""
+    select u.*
+    from sessoes_app sessao
+    join usuarios_app u on u.id = sessao.usuario_id
+    where sessao.token_hash=%s
+      and sessao.revogado_em is null
+      and u.ativo=true
+    limit 1
+    """, (hash_token_sessao(str(token)),))
+    return usuarios.iloc[0].to_dict() if len(usuarios) == 1 else None
+
+def revogar_sessao_persistente(token):
+    if token:
+        execute(
+            "update sessoes_app set revogado_em=now() where token_hash=%s and revogado_em is null",
+            (hash_token_sessao(str(token)),),
+        )
 
 def execute(sql, params=None):
     conn = get_conn()
@@ -1442,6 +1479,17 @@ def ensure_permissions_schema():
             language="sql",
         )
         st.stop()
+
+    execute("""
+    create table if not exists sessoes_app (
+      id bigserial primary key,
+      usuario_id uuid not null references usuarios_app(id) on delete cascade,
+      token_hash text not null unique,
+      criado_em timestamptz not null default now(),
+      revogado_em timestamptz
+    )
+    """)
+    execute("create index if not exists idx_sessoes_app_usuario on sessoes_app(usuario_id)")
 
     execute("""
     update usuarios_app
@@ -3301,6 +3349,13 @@ finally:
 
 if "user" not in st.session_state:
     st.session_state.user = None
+if "sessao_persistente_verificada" not in st.session_state:
+    token_cookie = cookie_controller.get(COOKIE_SESSAO)
+    usuario_cookie = usuario_da_sessao_persistente(token_cookie)
+    if usuario_cookie:
+        st.session_state.user = usuario_cookie
+        st.session_state.token_sessao = token_cookie
+    st.session_state.sessao_persistente_verificada = True
 
 with st.sidebar:
     st.header("Acesso")
@@ -3312,6 +3367,15 @@ with st.sidebar:
             df = query("select * from usuarios_app where email=%s and ativo=true", (email,))
             if len(df) == 1 and check_password(senha, df.iloc[0]["senha_hash"]):
                 st.session_state.user = df.iloc[0].to_dict()
+                token_sessao = criar_sessao_persistente(st.session_state.user["id"])
+                st.session_state.token_sessao = token_sessao
+                cookie_controller.set(
+                    COOKIE_SESSAO,
+                    token_sessao,
+                    expires=datetime.now(timezone.utc) + timedelta(days=3650),
+                    secure=True,
+                    same_site="strict",
+                )
                 st.rerun()
             else:
                 st.error("Login inválido.")
@@ -3319,7 +3383,11 @@ with st.sidebar:
         st.write(f"Usuário: **{st.session_state.user['nome']}**")
         st.write(f"Papel: **{st.session_state.user['papel']}**")
         if st.button("Sair"):
+            token_sessao = st.session_state.get("token_sessao") or cookie_controller.get(COOKIE_SESSAO)
+            revogar_sessao_persistente(token_sessao)
+            cookie_controller.remove(COOKIE_SESSAO, secure=True, same_site="strict")
             st.session_state.user = None
+            st.session_state.pop("token_sessao", None)
             st.rerun()
 
 if st.session_state.user is None:
