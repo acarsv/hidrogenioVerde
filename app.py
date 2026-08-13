@@ -3823,6 +3823,16 @@ if menu == "orcamento":
         subset=["Risco prazo"],
         axis=0,
     )
+    df_orcamento_visual = df_orcamento_visual.apply(
+        lambda coluna: ["color: #ff0000; font-weight: 800;" for _ in coluna.index],
+        subset=["Remanejamento"],
+        axis=0,
+    )
+    df_orcamento_visual = df_orcamento_visual.apply(
+        lambda coluna: ["color: #00b800; font-weight: 800;" for _ in coluna.index],
+        subset=["Valor disponível real"],
+        axis=0,
+    )
     st.caption("Clique em uma linha da tabela para abrir a visao de analise completa da rubrica abaixo.")
     evento_orcamento = st.dataframe(
         df_orcamento_visual,
