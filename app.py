@@ -3313,6 +3313,30 @@ if menu == "orcamento":
         st.info("Não há rubricas cadastradas no orçamento.")
         st.stop()
 
+    remanejamentos_ativos = query("""
+    select
+      origem_codigo,
+      destino_codigo,
+      valor
+    from vw_historico_remanejamentos
+    where status = 'ativo'
+    order by criado_em, remanejamento_id
+    """)
+    remanejamentos_por_rubrica = {str(codigo): [] for codigo in df["codigo"]}
+    for _, remanejamento in remanejamentos_ativos.iterrows():
+        origem_codigo = str(remanejamento["origem_codigo"])
+        destino_codigo = str(remanejamento["destino_codigo"])
+        valor_formatado = format_currency_brl(remanejamento["valor"])
+        remanejamentos_por_rubrica.setdefault(origem_codigo, []).append(
+            f"− {valor_formatado} → {destino_codigo}"
+        )
+        remanejamentos_por_rubrica.setdefault(destino_codigo, []).append(
+            f"+ {valor_formatado} ← {origem_codigo}"
+        )
+    df["remanejamento"] = df["codigo"].astype(str).map(
+        lambda codigo: " | ".join(remanejamentos_por_rubrica.get(codigo, [])) or "—"
+    )
+
     df["status_financeiro"] = df.apply(financial_status, axis=1)
     df["risco"] = df["status_financeiro"].apply(status_alert_level)
     compras_rubrica = query("""
@@ -3501,6 +3525,7 @@ if menu == "orcamento":
         "responsaveis": "Responsável",
         "tipo": "Tipo",
         "valor_orcado": "Valor orçado",
+        "remanejamento": "Remanejamento",
         "valor_reservado": "Valor reservado",
         "valor_utilizado": "Valor utilizado",
         "valor_compras_periodo": "Compras executadas",
@@ -3550,6 +3575,7 @@ if menu == "orcamento":
         "Código",
         "Rubrica",
         "Valor orçado",
+        "Remanejamento",
         "Valor utilizado",
         "Disponível operacional",
         "Reserva técnica",
@@ -3609,6 +3635,11 @@ if menu == "orcamento":
                 format="%.2f%%",
                 min_value=0,
                 max_value=100,
+            ),
+            "Remanejamento": st.column_config.TextColumn(
+                "Remanejamento",
+                help="Valores retirados (−) ou adicionados (+) por remanejamentos ativos entre rubricas.",
+                width="medium",
             ),
             "Risco": st.column_config.TextColumn("Risco", width="small"),
             "Risco prazo": st.column_config.TextColumn("Risco prazo", width="small"),
