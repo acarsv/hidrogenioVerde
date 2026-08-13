@@ -7,7 +7,18 @@ select
   origem.nome as origem_nome,
   destino.codigo as destino_codigo,
   destino.nome as destino_nome,
-  saida.valor,
+  coalesce(
+    replace(
+      replace(
+        substring(saida.justificativa from 'Valor total informado: R\$ ([0-9.]+,[0-9]{2})'),
+        '.',
+        ''
+      ),
+      ',',
+      '.'
+    )::numeric(14,2),
+    saida.valor
+  ) as valor,
   saida.justificativa,
   case
     when saida.estornado_em is not null or entrada.estornado_em is not null then 'estornado'
