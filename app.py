@@ -3533,8 +3533,13 @@ if menu == "orcamento":
             saldo_remanejado_por_rubrica.get(destino_codigo, Decimal("0")) - valor_remanejado
         )
     df["remanejamento"] = df["codigo"].astype(str).map(
-        lambda codigo: " | ".join(remanejamentos_por_rubrica.get(codigo, [])) or "—"
+        lambda codigo: "\n".join(remanejamentos_por_rubrica.get(codigo, [])) or "—"
     )
+    maior_quantidade_remanejamentos = max(
+        (len(remanejamentos) for remanejamentos in remanejamentos_por_rubrica.values()),
+        default=1,
+    )
+    altura_linha_orcamento = max(36, 24 * maior_quantidade_remanejamentos + 12)
     df["valor_inicial_projeto"] = df.apply(
         lambda rubrica: Decimal(str(rubrica["valor_orcado"] or 0))
         + saldo_remanejado_por_rubrica.get(str(rubrica["codigo"]), Decimal("0")),
@@ -3838,6 +3843,7 @@ if menu == "orcamento":
         df_orcamento_visual,
         use_container_width=True,
         hide_index=True,
+        row_height=altura_linha_orcamento,
         on_select="rerun",
         selection_mode="single-row",
         column_config={
