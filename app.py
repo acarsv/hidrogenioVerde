@@ -3919,6 +3919,8 @@ if menu == "orcamento":
       origem_codigo || ' - ' || origem_nome as "Origem",
       destino_codigo || ' - ' || destino_nome as "Destino",
       valor as "Valor",
+      status as "Status",
+      estornado_em as "Estornado em",
       justificativa as "Justificativa"
     from vw_historico_remanejamentos
     order by criado_em desc
@@ -3930,7 +3932,16 @@ if menu == "orcamento":
             .dt.strftime("%d/%m/%Y %H:%M")
             .fillna("")
         )
+        remanejamentos_orcamento["Estornado em"] = (
+            pd.to_datetime(remanejamentos_orcamento["Estornado em"], errors="coerce")
+            .dt.strftime("%d/%m/%Y %H:%M")
+            .fillna("—")
+        )
         remanejamentos_orcamento["Valor"] = remanejamentos_orcamento["Valor"].apply(format_currency_brl)
+        remanejamentos_orcamento["Status"] = remanejamentos_orcamento["Status"].map({
+            "ativo": "Ativo",
+            "estornado": "Estornado",
+        }).fillna(remanejamentos_orcamento["Status"])
         st.dataframe(remanejamentos_orcamento, use_container_width=True, hide_index=True)
 
 elif menu == "nova_exigencia":
