@@ -3712,11 +3712,11 @@ if menu == "orcamento":
     )
     # O resumo exibe apenas saldos disponíveis não negativos. Por isso, somar
     # valor_utilizado diretamente pode misturar uma rubrica estourada com o
-    # saldo positivo de outra e deixar a linha sem reconciliação. Recalcula o
-    # usado na mesma base exibida: orçado = usado + reservado + disponível.
+    # saldo positivo de outra e deixar a linha sem reconciliação. Neste quadro,
+    # "Valor usado" representa todo o valor comprometido, inclusive reservas:
+    # orçado = usado + disponível.
     resumo_tipo_orcamento["valor_utilizado"] = (
         pd.to_numeric(resumo_tipo_orcamento["valor_orcado"], errors="coerce").fillna(0)
-        - pd.to_numeric(resumo_tipo_orcamento["valor_reservado"], errors="coerce").fillna(0)
         - resumo_tipo_orcamento["saldo_disponivel"]
     ).clip(lower=0)
     resumo_tipo_exibicao = resumo_tipo_orcamento.rename(columns={
