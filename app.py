@@ -3842,6 +3842,19 @@ if menu == "orcamento":
         subset=["Valor disponível real"],
         axis=0,
     )
+    df_orcamento_visual = df_orcamento_visual.apply(
+        lambda coluna: [
+            (
+                "background-color: #ff0000; color: #ffffff; font-weight: 800; "
+                "text-align: center;"
+                if str(valor).strip().lower().replace(" ", "") == "encerrado/semsaldo"
+                else ""
+            )
+            for valor in coluna
+        ],
+        subset=["Sinal prazo"],
+        axis=0,
+    )
     st.caption("Clique em uma linha da tabela para abrir a visao de analise completa da rubrica abaixo.")
     evento_orcamento = st.dataframe(
         df_orcamento_visual,
