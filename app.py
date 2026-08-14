@@ -3535,11 +3535,9 @@ if menu == "orcamento":
     df["remanejamento"] = df["codigo"].astype(str).map(
         lambda codigo: "\n".join(remanejamentos_por_rubrica.get(codigo, [])) or "—"
     )
-    maior_quantidade_remanejamentos = max(
-        (len(remanejamentos) for remanejamentos in remanejamentos_por_rubrica.values()),
-        default=1,
+    quantidade_remanejamentos_por_indice = df["codigo"].astype(str).map(
+        lambda codigo: len(remanejamentos_por_rubrica.get(codigo, []))
     )
-    altura_linha_orcamento = max(36, 24 * maior_quantidade_remanejamentos + 12)
     df["valor_inicial_projeto"] = df.apply(
         lambda rubrica: Decimal(str(rubrica["valor_orcado"] or 0))
         + saldo_remanejado_por_rubrica.get(str(rubrica["codigo"]), Decimal("0")),
@@ -3829,7 +3827,13 @@ if menu == "orcamento":
         axis=0,
     )
     df_orcamento_visual = df_orcamento_visual.apply(
-        lambda coluna: ["color: #ff0000; font-weight: 800;" for _ in coluna.index],
+        lambda coluna: [
+            (
+                "color: #ff0000; font-weight: 800; white-space: pre-line; "
+                f"line-height: 22px; min-height: {max(22, int(quantidade_remanejamentos_por_indice.loc[indice]) * 22)}px;"
+            )
+            for indice in coluna.index
+        ],
         subset=["Remanejamento"],
         axis=0,
     )
@@ -3843,7 +3847,6 @@ if menu == "orcamento":
         df_orcamento_visual,
         use_container_width=True,
         hide_index=True,
-        row_height=altura_linha_orcamento,
         on_select="rerun",
         selection_mode="single-row",
         column_config={
