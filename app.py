@@ -12,6 +12,7 @@ import bcrypt
 import pandas as pd
 import psycopg2
 import psycopg2.extras
+from psycopg2.pool import ThreadedConnectionPool
 import streamlit as st
 from streamlit_cookies_controller import CookieController
 from dotenv import load_dotenv
@@ -32,18 +33,23 @@ APP_DEPLOY_VERSION = "2026-05-11.10"
 PERIODO_PRESTACAO_INICIO = date(2026, 3, 1)
 PERIODO_PRESTACAO_FIM = date(2027, 3, 31)
 
-def get_conn():
+def database_url():
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         st.error("DATABASE_URL nao foi definida no arquivo .env.")
         st.stop()
+    return database_url
+
+
+def get_conn():
+    database_url_atual = database_url()
 
     try:
-        conn = psycopg2.connect(database_url)
+        conn = psycopg2.connect(database_url_atual)
         conn.autocommit = True
         return conn
     except psycopg2.OperationalError as exc:
-        parsed = urlparse(database_url)
+        parsed = urlparse(database_url_atual)
         host = parsed.hostname or "host nao identificado"
         try:
             port = parsed.port or "porta padrao"
@@ -62,8 +68,32 @@ def get_conn():
             st.code(str(exc))
         st.stop()
 
+
+@st.cache_resource(show_spinner=False)
+def get_connection_pool(database_url_atual):
+    return ThreadedConnectionPool(1, 10, database_url_atual)
+
+
+def get_pooled_conn():
+    try:
+        conn = get_connection_pool(database_url()).getconn()
+        conn.autocommit = True
+        return conn
+    except psycopg2.OperationalError as exc:
+        st.error("Nao foi possivel obter uma conexao com o banco de dados.")
+        with st.expander("Detalhe tecnico"):
+            st.code(str(exc))
+        st.stop()
+
+
+def release_pooled_conn(conn):
+    if conn is None:
+        return
+    pool = get_connection_pool(database_url())
+    pool.putconn(conn, close=bool(conn.closed))
+
 def query(sql, params=None):
-    conn = get_conn()
+    conn = get_pooled_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, params or ())
@@ -74,7 +104,7 @@ def query(sql, params=None):
         conn.rollback()
         raise
     finally:
-        conn.close()
+        release_pooled_conn(conn)
 
 def hash_token_sessao(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -109,7 +139,7 @@ def revogar_sessao_persistente(token):
         )
 
 def execute(sql, params=None):
-    conn = get_conn()
+    conn = get_pooled_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(sql, params or ())
@@ -117,7 +147,7 @@ def execute(sql, params=None):
         conn.rollback()
         raise
     finally:
-        conn.close()
+        release_pooled_conn(conn)
 
 def gerar_numero_patrimonio_labdes(data_referencia=None):
     data_referencia = data_referencia or date.today()
@@ -139,11 +169,7 @@ def acquire_startup_schema_lock():
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("select pg_try_advisory_lock(2026052602)")
-            locked = cur.fetchone()[0]
-            if not locked:
-                conn.close()
-                return None
+            cur.execute("select pg_advisory_lock(2026052602)")
         return conn
     except Exception:
         conn.close()
@@ -3331,21 +3357,27 @@ def sincronizar_orcamento():
     where r.id = totais.rubrica_id
     """)
 
-startup_schema_lock_conn = None
-try:
-    startup_schema_lock_conn = acquire_startup_schema_lock()
-    if startup_schema_lock_conn:
+@st.cache_resource(show_spinner=False)
+def initialize_database_schema():
+    startup_schema_lock_conn = None
+    try:
+        startup_schema_lock_conn = acquire_startup_schema_lock()
         ensure_permissions_schema()
         ensure_financial_governance_schema()
         criar_schema_ia_operacional()
+        return True
+    finally:
+        release_startup_schema_lock(startup_schema_lock_conn)
+
+
+try:
+    initialize_database_schema()
 except psycopg2.Error as exc:
     st.error("Nao foi possivel preparar o banco de dados para iniciar o app.")
     st.caption("Confira se as tabelas foram criadas no Supabase e reinicie o app no Streamlit Cloud.")
     with st.expander("Detalhe tecnico"):
         st.code(str(exc))
     st.stop()
-finally:
-    release_startup_schema_lock(startup_schema_lock_conn)
 
 if "user" not in st.session_state:
     st.session_state.user = None
@@ -3604,7 +3636,11 @@ if menu == "orcamento":
     total_reservado = df.valor_reservado.sum()
     total_utilizado = df.valor_utilizado.sum()
     total_reserva_tecnica = df.reserva_tecnica.sum()
-    diferenca_sem_reserva_tecnica = total_orcado - total_reservado - total_utilizado
+    diferenca_sem_reserva_tecnica = (
+        pd.to_numeric(df.valor_orcado, errors="coerce").fillna(0)
+        - pd.to_numeric(df.valor_reservado, errors="coerce").fillna(0)
+        - pd.to_numeric(df.valor_utilizado, errors="coerce").fillna(0)
+    ).clip(lower=0).sum()
     total_disponivel = pd.to_numeric(df.saldo_disponivel, errors="coerce").fillna(0).clip(lower=0).sum()
     total_compras_periodo = df.valor_compras_periodo.sum()
     percentual_compras_global = round((float(total_compras_periodo) * 100.0 / float(total_orcado)), 2) if float(total_orcado or 0) > 0 else 0
@@ -3631,6 +3667,16 @@ if menu == "orcamento":
 
     resumo_tipo_orcamento = df.copy()
     resumo_tipo_orcamento["Categoria"] = resumo_tipo_orcamento["tipo"].apply(categoria_orcamento_tipo)
+    resumo_tipo_orcamento["saldo_disponivel"] = (
+        pd.to_numeric(resumo_tipo_orcamento["saldo_disponivel"], errors="coerce")
+        .fillna(0)
+        .clip(lower=0)
+    )
+    resumo_tipo_orcamento["valor_disponivel_real"] = (
+        pd.to_numeric(resumo_tipo_orcamento["valor_orcado"], errors="coerce").fillna(0)
+        - pd.to_numeric(resumo_tipo_orcamento["valor_utilizado"], errors="coerce").fillna(0)
+        - pd.to_numeric(resumo_tipo_orcamento["valor_reservado"], errors="coerce").fillna(0)
+    ).clip(lower=0)
     resumo_tipo_orcamento = (
         resumo_tipo_orcamento
         .groupby("Categoria", as_index=False)
@@ -3639,6 +3685,7 @@ if menu == "orcamento":
             valor_utilizado=("valor_utilizado", "sum"),
             valor_reservado=("valor_reservado", "sum"),
             saldo_disponivel=("saldo_disponivel", "sum"),
+            valor_disponivel_real=("valor_disponivel_real", "sum"),
         )
     )
     ordem_categorias_orcamento = ["Material permanente", "Material de consumo", "Serviço", "Outros"]
@@ -3650,18 +3697,19 @@ if menu == "orcamento":
     resumo_tipo_orcamento = (
         pd.DataFrame({"Categoria": ordem_categorias_orcamento[:3]})
         .merge(resumo_tipo_orcamento, on="Categoria", how="left")
-        .fillna({"valor_orcado": 0, "valor_utilizado": 0, "valor_reservado": 0, "saldo_disponivel": 0})
+        .fillna({
+            "valor_orcado": 0,
+            "valor_utilizado": 0,
+            "valor_reservado": 0,
+            "saldo_disponivel": 0,
+            "valor_disponivel_real": 0,
+        })
     )
     resumo_tipo_orcamento["saldo_disponivel"] = (
         pd.to_numeric(resumo_tipo_orcamento["saldo_disponivel"], errors="coerce")
         .fillna(0)
         .clip(lower=0)
     )
-    resumo_tipo_orcamento["valor_disponivel_real"] = (
-        resumo_tipo_orcamento["valor_orcado"]
-        - resumo_tipo_orcamento["valor_utilizado"]
-        - resumo_tipo_orcamento["valor_reservado"]
-    ).clip(lower=0)
     resumo_tipo_exibicao = resumo_tipo_orcamento.rename(columns={
         "valor_orcado": "Valor orçado",
         "valor_utilizado": "Valor usado",
