@@ -1519,7 +1519,7 @@ def ensure_permissions_schema():
 
     execute("""
     update usuarios_app
-    set permissoes = array['orcamento','nova_exigencia','solicitacoes','cotacoes','compra_nota','comprovantes_bancarios','documentos','pedidos_finalizados','destino_final','auditoria','ia_operacional','itens_comprados','membros']
+    set permissoes = array['orcamento','nova_exigencia','solicitacoes','cotacoes','compra_nota','comprovantes_bancarios','documentos','pedidos_finalizados','resumo_pedidos','destino_final','auditoria','ia_operacional','itens_comprados','membros']
     where papel = 'admin' and (permissoes is null or cardinality(permissoes) = 0)
     """)
     execute("""
@@ -1536,6 +1536,11 @@ def ensure_permissions_schema():
     update usuarios_app
     set permissoes = array_append(permissoes, 'documentos')
     where papel = 'admin' and not ('documentos' = any(permissoes))
+    """)
+    execute("""
+    update usuarios_app
+    set permissoes = array_append(permissoes, 'resumo_pedidos')
+    where papel = 'admin' and not ('resumo_pedidos' = any(permissoes))
     """)
 
 def hash_password(password: str) -> str:
@@ -3436,6 +3441,7 @@ BASE_MENU_OPTIONS = [
     ("comprovantes_bancarios", "Comprovantes bancários"),
     ("documentos", "Documentos"),
     ("pedidos_finalizados", "Pedidos finalizados"),
+    ("resumo_pedidos", "Resumo de pedidos"),
     ("destino_final", "Destino final"),
     ("auditoria", "Auditoria"),
     ("ia_operacional", "IA Operacional e Auditoria de Gargalos"),
@@ -7204,6 +7210,117 @@ elif menu == "pedidos_finalizados":
             cancelar_solicitacao(int(solicitacao_id), user["id"])
         st.success(f"Pedido #{int(pedido_cancelar_id)} cancelado.")
         st.rerun()
+
+elif menu == "resumo_pedidos":
+    st.caption("Pedidos e itens agrupados por tipo de despesa. Pedidos cancelados não são incluídos.")
+    itens_pedidos = query("""
+    with notas_por_item as (
+      select
+        nfi.pedido_item_id,
+        string_agg(
+          distinct coalesce(nullif(trim(nf.numero_nf), ''), '#' || nf.id::text),
+          ', '
+        ) as notas_fiscais
+      from nota_fiscal_itens nfi
+      join notas_fiscais nf on nf.id = nfi.nota_fiscal_id
+      group by nfi.pedido_item_id
+    )
+    select
+      coalesce(pi.pedido_manual_id, p.id, s.id) as pedido_id,
+      s.id as solicitacao_id,
+      coalesce(nullif(s.numero, ''), '#' || s.id::text) as solicitacao,
+      s.status::text as status,
+      pi.id as item_id,
+      pi.tipo_item,
+      r.codigo as rubrica,
+      pi.descricao,
+      pi.quantidade,
+      pi.valor_unitario,
+      pi.valor_total,
+      coalesce(npi.notas_fiscais, 'Sem nota fiscal') as notas_fiscais,
+      coalesce(p.criado_em, s.criado_em, pi.created_at) as criado_em
+    from pedido_itens pi
+    join solicitacoes_compra s on s.id = pi.pedido_id
+    join rubricas r on r.id = pi.rubrica_id
+    left join pedidos p
+      on p.id = pi.pedido_manual_id
+      or (pi.pedido_manual_id is null and p.solicitacao_id = s.id)
+    left join notas_por_item npi on npi.pedido_item_id = pi.id
+    where s.status <> 'cancelado'
+      and coalesce(p.status, '') <> 'cancelado'
+    order by pi.tipo_item, pedido_id, pi.created_at, pi.descricao
+    """)
+
+    if len(itens_pedidos) == 0:
+        st.info("Nenhum pedido com itens foi encontrado.")
+    else:
+        tipos_pedido = [
+            ("permanente", "Material permanente"),
+            ("consumo", "Material de consumo"),
+            ("servico", "Serviço"),
+        ]
+        total_geral_pedidos = Decimal(str(itens_pedidos["valor_total"].sum())).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        total_coluna, pedidos_coluna, itens_coluna = st.columns(3)
+        total_coluna.metric("Total geral dos pedidos", format_currency_brl(total_geral_pedidos))
+        pedidos_coluna.metric("Pedidos", int(itens_pedidos["pedido_id"].nunique()))
+        itens_coluna.metric("Itens", int(len(itens_pedidos)))
+
+        abas_tipos = st.tabs([rotulo for _, rotulo in tipos_pedido])
+        for aba, (tipo_item, rotulo_tipo) in zip(abas_tipos, tipos_pedido):
+            with aba:
+                itens_tipo = itens_pedidos[itens_pedidos["tipo_item"] == tipo_item].copy()
+                total_tipo = Decimal(str(itens_tipo["valor_total"].sum() if len(itens_tipo) else 0)).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                st.metric(f"Total — {rotulo_tipo}", format_currency_brl(total_tipo))
+                if len(itens_tipo) == 0:
+                    st.info(f"Nenhum pedido de {rotulo_tipo.lower()} encontrado.")
+                    continue
+
+                for pedido_id, itens_do_pedido in itens_tipo.groupby("pedido_id", sort=True):
+                    subtotal_pedido = Decimal(str(itens_do_pedido["valor_total"].sum())).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP
+                    )
+                    solicitacoes = ", ".join(sorted(set(itens_do_pedido["solicitacao"].astype(str))))
+                    status_pedido = ", ".join(
+                        sorted(set(itens_do_pedido["status"].apply(normalizar_texto_portugues).astype(str)))
+                    )
+                    with st.expander(
+                        f"Pedido #{int(pedido_id)} — {format_currency_brl(subtotal_pedido)}",
+                        expanded=True,
+                    ):
+                        st.caption(f"Solicitação: {solicitacoes} | Status: {status_pedido}")
+                        tabela_itens = itens_do_pedido.copy()
+                        tabela_itens["Item"] = tabela_itens["descricao"]
+                        tabela_itens["Rubrica"] = tabela_itens["rubrica"]
+                        tabela_itens["Quantidade"] = pd.to_numeric(
+                            tabela_itens["quantidade"], errors="coerce"
+                        ).fillna(0)
+                        tabela_itens["Valor unitário"] = tabela_itens["valor_unitario"].apply(format_currency_brl)
+                        tabela_itens["Valor total"] = tabela_itens["valor_total"].apply(format_currency_brl)
+                        tabela_itens["Nota fiscal"] = tabela_itens["notas_fiscais"]
+                        tabela_itens = tabela_itens[[
+                            "Item",
+                            "Rubrica",
+                            "Quantidade",
+                            "Valor unitário",
+                            "Valor total",
+                            "Nota fiscal",
+                        ]]
+                        linha_subtotal = {coluna: "" for coluna in tabela_itens.columns}
+                        linha_subtotal["Item"] = "TOTAL DO PEDIDO"
+                        linha_subtotal["Valor total"] = format_currency_brl(subtotal_pedido)
+                        tabela_itens = pd.concat(
+                            [tabela_itens, pd.DataFrame([linha_subtotal])], ignore_index=True
+                        )
+                        st.dataframe(tabela_itens, use_container_width=True, hide_index=True)
+
+                st.markdown(f"**TOTAL DE {rotulo_tipo.upper()}: {format_currency_brl(total_tipo)}**")
+
+        st.divider()
+        st.markdown(f"## TOTAL GERAL: {format_currency_brl(total_geral_pedidos)}")
 
 elif menu == "destino_final":
     sincronizar_status_operacional()
