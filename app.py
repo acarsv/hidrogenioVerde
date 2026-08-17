@@ -3537,6 +3537,20 @@ if menu == "orcamento":
         st.info("Não há rubricas cadastradas no orçamento.")
         st.stop()
 
+    extras_por_rubrica = query("""
+    select
+      rubrica_id as id,
+      coalesce(sum(valor), 0) as valor_extras
+    from valores_extra_nao_debitados
+    where rubrica_id is not null
+    group by rubrica_id
+    """)
+    if len(extras_por_rubrica):
+        df = df.merge(extras_por_rubrica, on="id", how="left")
+    else:
+        df["valor_extras"] = 0
+    df["valor_extras"] = pd.to_numeric(df["valor_extras"], errors="coerce").fillna(0)
+
     remanejamentos_ativos = query("""
     select
       origem_codigo,
@@ -3640,6 +3654,7 @@ if menu == "orcamento":
 
     total_orcado = df.valor_orcado.sum()
     total_reservado = df.valor_reservado.sum()
+    total_extras = df.valor_extras.sum()
     total_utilizado = df.valor_utilizado.sum()
     total_reserva_tecnica = df.reserva_tecnica.sum()
     diferenca_sem_reserva_tecnica = (
@@ -3657,7 +3672,11 @@ if menu == "orcamento":
     c2.metric("Total utilizado", format_currency_brl(total_utilizado))
     c3.metric("Disponível operacional sem reserva técnica", format_currency_brl(diferenca_sem_reserva_tecnica))
     c4, c5, c6 = st.columns(3)
-    c4.metric("Total reservado", format_currency_brl(total_reservado))
+    c4.metric(
+        "Extras fora do projeto",
+        format_currency_brl(total_extras),
+        help="Fretes, taxas bancárias e outros valores que não reduzem as rubricas.",
+    )
     c5.metric("Disponível operacional", format_currency_brl(total_disponivel))
     c6.metric("Reserva técnica", format_currency_brl(total_reserva_tecnica))
 
@@ -3690,6 +3709,7 @@ if menu == "orcamento":
             valor_orcado=("valor_orcado", "sum"),
             valor_utilizado=("valor_utilizado", "sum"),
             valor_reservado=("valor_reservado", "sum"),
+            valor_extras=("valor_extras", "sum"),
             saldo_disponivel=("saldo_disponivel", "sum"),
             valor_disponivel_real=("valor_disponivel_real", "sum"),
         )
@@ -3707,6 +3727,7 @@ if menu == "orcamento":
             "valor_orcado": 0,
             "valor_utilizado": 0,
             "valor_reservado": 0,
+            "valor_extras": 0,
             "saldo_disponivel": 0,
             "valor_disponivel_real": 0,
         })
@@ -3716,18 +3737,20 @@ if menu == "orcamento":
         .fillna(0)
         .clip(lower=0)
     )
-    # O resumo exibe apenas saldos disponíveis não negativos. Por isso, somar
-    # valor_utilizado diretamente pode misturar uma rubrica estourada com o
-    # saldo positivo de outra e deixar a linha sem reconciliação. Neste quadro,
-    # "Valor usado" representa todo o valor comprometido, inclusive reservas:
-    # orçado = usado + disponível.
-    resumo_tipo_orcamento["valor_utilizado"] = (
-        pd.to_numeric(resumo_tipo_orcamento["valor_orcado"], errors="coerce").fillna(0)
-        - resumo_tipo_orcamento["saldo_disponivel"]
-    ).clip(lower=0)
+    resumo_tipo_orcamento["valor_utilizado"] = pd.to_numeric(
+        resumo_tipo_orcamento["valor_utilizado"], errors="coerce"
+    ).fillna(0)
+    resumo_tipo_orcamento["valor_extras"] = pd.to_numeric(
+        resumo_tipo_orcamento["valor_extras"], errors="coerce"
+    ).fillna(0)
+    resumo_tipo_orcamento["total_documental"] = (
+        resumo_tipo_orcamento["valor_utilizado"] + resumo_tipo_orcamento["valor_extras"]
+    )
     resumo_tipo_exibicao = resumo_tipo_orcamento.rename(columns={
         "valor_orcado": "Valor orçado",
         "valor_utilizado": "Valor usado",
+        "valor_extras": "Extras fora do projeto",
+        "total_documental": "Total documental",
         "saldo_disponivel": "Valor disponível",
         "valor_disponivel_real": "Valor disponível real",
     })
@@ -3735,10 +3758,19 @@ if menu == "orcamento":
         "Categoria",
         "Valor orçado",
         "Valor usado",
+        "Extras fora do projeto",
+        "Total documental",
         "Valor disponível",
         "Valor disponível real",
     ]]
-    for coluna in ["Valor orçado", "Valor usado", "Valor disponível", "Valor disponível real"]:
+    for coluna in [
+        "Valor orçado",
+        "Valor usado",
+        "Extras fora do projeto",
+        "Total documental",
+        "Valor disponível",
+        "Valor disponível real",
+    ]:
         resumo_tipo_exibicao[coluna] = resumo_tipo_exibicao[coluna].apply(format_currency_brl)
     st.markdown("### Resumo por tipo de despesa")
     st.dataframe(resumo_tipo_exibicao, use_container_width=True, hide_index=True)
@@ -3798,6 +3830,7 @@ if menu == "orcamento":
         "valor_orcado": "Valor orçado",
         "remanejamento": "Remanejamento",
         "valor_reservado": "Valor reservado",
+        "valor_extras": "Extras",
         "valor_utilizado": "Valor utilizado",
         "valor_compras_periodo": "Compras executadas",
         "percentual_compras_periodo": "Progresso das compras",
@@ -3828,6 +3861,7 @@ if menu == "orcamento":
         "Valor inicial do projeto",
         "Valor orçado",
         "Valor reservado",
+        "Extras",
         "Valor utilizado",
         "Valor disponível real",
         "Compras executadas",
@@ -3852,7 +3886,7 @@ if menu == "orcamento":
         "Valor utilizado",
         "Disponível operacional",
         "Reserva técnica",
-        "Valor reservado",
+        "Extras",
         "Valor disponível real",
         "Progresso das compras",
         "Sinal prazo",
