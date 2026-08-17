@@ -7217,6 +7217,7 @@ elif menu == "resumo_pedidos":
     with notas_por_item as (
       select
         nfi.pedido_item_id,
+        sum(nfi.valor_total) as valor_faturado,
         string_agg(
           distinct coalesce(nullif(trim(nf.numero_nf), ''), '#' || nf.id::text),
           ', '
@@ -7224,6 +7225,14 @@ elif menu == "resumo_pedidos":
       from nota_fiscal_itens nfi
       join notas_fiscais nf on nf.id = nfi.nota_fiscal_id
       group by nfi.pedido_item_id
+    ),
+    cotacao_vencedora_por_item as (
+      select
+        ci.pedido_item_id,
+        sum(ci.valor_total) as valor_vencedor
+      from cotacao_itens ci
+      where ci.vencedor = true
+      group by ci.pedido_item_id
     )
     select
       coalesce(pi.pedido_manual_id, p.id, s.id) as pedido_id,
@@ -7237,6 +7246,14 @@ elif menu == "resumo_pedidos":
       pi.quantidade,
       pi.valor_unitario,
       pi.valor_total,
+      coalesce(npi.valor_faturado, cvpi.valor_vencedor, pi.valor_total) as valor_exibicao,
+      coalesce(npi.valor_faturado, cvpi.valor_vencedor, pi.valor_total)
+        / nullif(pi.quantidade, 0) as valor_unitario_exibicao,
+      case
+        when npi.valor_faturado is not null then 'Nota fiscal'
+        when cvpi.valor_vencedor is not null then 'Cotação vencedora'
+        else 'Pedido estimado'
+      end as fonte_valor,
       coalesce(npi.notas_fiscais, 'Sem nota fiscal') as notas_fiscais,
       coalesce(p.criado_em, s.criado_em, pi.created_at) as criado_em
     from pedido_itens pi
@@ -7246,6 +7263,7 @@ elif menu == "resumo_pedidos":
       on p.id = pi.pedido_manual_id
       or (pi.pedido_manual_id is null and p.solicitacao_id = s.id)
     left join notas_por_item npi on npi.pedido_item_id = pi.id
+    left join cotacao_vencedora_por_item cvpi on cvpi.pedido_item_id = pi.id
     where s.status <> 'cancelado'
       and coalesce(p.status, '') <> 'cancelado'
     order by pi.tipo_item, pedido_id, pi.created_at, pi.descricao
@@ -7259,7 +7277,7 @@ elif menu == "resumo_pedidos":
             ("consumo", "Material de consumo"),
             ("servico", "Serviço"),
         ]
-        total_geral_pedidos = Decimal(str(itens_pedidos["valor_total"].sum())).quantize(
+        total_geral_pedidos = Decimal(str(itens_pedidos["valor_exibicao"].sum())).quantize(
             Decimal("0.01"), rounding=ROUND_HALF_UP
         )
         total_coluna, pedidos_coluna, itens_coluna = st.columns(3)
@@ -7271,7 +7289,7 @@ elif menu == "resumo_pedidos":
         for aba, (tipo_item, rotulo_tipo) in zip(abas_tipos, tipos_pedido):
             with aba:
                 itens_tipo = itens_pedidos[itens_pedidos["tipo_item"] == tipo_item].copy()
-                total_tipo = Decimal(str(itens_tipo["valor_total"].sum() if len(itens_tipo) else 0)).quantize(
+                total_tipo = Decimal(str(itens_tipo["valor_exibicao"].sum() if len(itens_tipo) else 0)).quantize(
                     Decimal("0.01"), rounding=ROUND_HALF_UP
                 )
                 st.metric(f"Total — {rotulo_tipo}", format_currency_brl(total_tipo))
@@ -7280,7 +7298,7 @@ elif menu == "resumo_pedidos":
                     continue
 
                 for pedido_id, itens_do_pedido in itens_tipo.groupby("pedido_id", sort=True):
-                    subtotal_pedido = Decimal(str(itens_do_pedido["valor_total"].sum())).quantize(
+                    subtotal_pedido = Decimal(str(itens_do_pedido["valor_exibicao"].sum())).quantize(
                         Decimal("0.01"), rounding=ROUND_HALF_UP
                     )
                     solicitacoes = ", ".join(sorted(set(itens_do_pedido["solicitacao"].astype(str))))
@@ -7298,8 +7316,9 @@ elif menu == "resumo_pedidos":
                         tabela_itens["Quantidade"] = pd.to_numeric(
                             tabela_itens["quantidade"], errors="coerce"
                         ).fillna(0)
-                        tabela_itens["Valor unitário"] = tabela_itens["valor_unitario"].apply(format_currency_brl)
-                        tabela_itens["Valor total"] = tabela_itens["valor_total"].apply(format_currency_brl)
+                        tabela_itens["Valor unitário"] = tabela_itens["valor_unitario_exibicao"].apply(format_currency_brl)
+                        tabela_itens["Valor total"] = tabela_itens["valor_exibicao"].apply(format_currency_brl)
+                        tabela_itens["Origem do valor"] = tabela_itens["fonte_valor"]
                         tabela_itens["Nota fiscal"] = tabela_itens["notas_fiscais"]
                         tabela_itens = tabela_itens[[
                             "Item",
@@ -7307,6 +7326,7 @@ elif menu == "resumo_pedidos":
                             "Quantidade",
                             "Valor unitário",
                             "Valor total",
+                            "Origem do valor",
                             "Nota fiscal",
                         ]]
                         linha_subtotal = {coluna: "" for coluna in tabela_itens.columns}
