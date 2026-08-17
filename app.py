@@ -7268,6 +7268,33 @@ elif menu == "resumo_pedidos":
       and coalesce(p.status, '') <> 'cancelado'
     order by pi.tipo_item, pedido_id, pi.created_at, pi.descricao
     """)
+    valores_extras_pedidos = query("""
+    select
+      coalesce(
+        (select max(pi_extra.pedido_manual_id) from pedido_itens pi_extra where pi_extra.pedido_id = s.id),
+        p.id,
+        v.solicitacao_id
+      ) as pedido_id,
+      case
+        when r.tipo::text = 'material_permanente' then 'permanente'
+        when r.tipo::text = 'material_consumo' then 'consumo'
+        when r.tipo::text = 'servico_pf' then 'servico'
+        else 'outro'
+      end as tipo_item,
+      r.codigo as rubrica,
+      v.tipo,
+      v.descricao,
+      v.valor,
+      coalesce(nullif(trim(nf.numero_nf), ''), 'Sem nota fiscal') as nota_fiscal,
+      coalesce(v.responsavel_pagamento, 'Não informado') as responsavel_pagamento
+    from valores_extra_nao_debitados v
+    join solicitacoes_compra s on s.id = v.solicitacao_id
+    join rubricas r on r.id = v.rubrica_id
+    left join pedidos p on p.solicitacao_id = s.id
+    left join notas_fiscais nf on nf.id = v.nota_fiscal_id
+    where s.status <> 'cancelado'
+    order by pedido_id, v.criado_em, v.id
+    """)
 
     if len(itens_pedidos) == 0:
         st.info("Nenhum pedido com itens foi encontrado.")
@@ -7280,10 +7307,15 @@ elif menu == "resumo_pedidos":
         total_geral_pedidos = Decimal(str(itens_pedidos["valor_exibicao"].sum())).quantize(
             Decimal("0.01"), rounding=ROUND_HALF_UP
         )
-        total_coluna, pedidos_coluna, itens_coluna = st.columns(3)
-        total_coluna.metric("Total geral dos pedidos", format_currency_brl(total_geral_pedidos))
+        total_geral_extras = Decimal(str(
+            valores_extras_pedidos["valor"].sum() if len(valores_extras_pedidos) else 0
+        )).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        total_documental = total_geral_pedidos + total_geral_extras
+        total_coluna, extras_coluna, documental_coluna, pedidos_coluna = st.columns(4)
+        total_coluna.metric("Total das rubricas", format_currency_brl(total_geral_pedidos))
+        extras_coluna.metric("Extras fora do projeto", format_currency_brl(total_geral_extras))
+        documental_coluna.metric("Total documental", format_currency_brl(total_documental))
         pedidos_coluna.metric("Pedidos", int(itens_pedidos["pedido_id"].nunique()))
-        itens_coluna.metric("Itens", int(len(itens_pedidos)))
 
         abas_tipos = st.tabs([rotulo for _, rotulo in tipos_pedido])
         for aba, (tipo_item, rotulo_tipo) in zip(abas_tipos, tipos_pedido):
@@ -7292,7 +7324,19 @@ elif menu == "resumo_pedidos":
                 total_tipo = Decimal(str(itens_tipo["valor_exibicao"].sum() if len(itens_tipo) else 0)).quantize(
                     Decimal("0.01"), rounding=ROUND_HALF_UP
                 )
-                st.metric(f"Total — {rotulo_tipo}", format_currency_brl(total_tipo))
+                extras_tipo = valores_extras_pedidos[
+                    valores_extras_pedidos["tipo_item"] == tipo_item
+                ].copy() if len(valores_extras_pedidos) else valores_extras_pedidos.copy()
+                total_extras_tipo = Decimal(str(
+                    extras_tipo["valor"].sum() if len(extras_tipo) else 0
+                )).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                tipo_total_coluna, tipo_extra_coluna = st.columns(2)
+                tipo_total_coluna.metric(f"Total — {rotulo_tipo}", format_currency_brl(total_tipo))
+                tipo_extra_coluna.metric(
+                    "Extras fora das rubricas",
+                    format_currency_brl(total_extras_tipo),
+                    help="Valor informativo: não compõe o total da categoria nem reduz o saldo das rubricas.",
+                )
                 if len(itens_tipo) == 0:
                     st.info(f"Nenhum pedido de {rotulo_tipo.lower()} encontrado.")
                     continue
@@ -7301,12 +7345,20 @@ elif menu == "resumo_pedidos":
                     subtotal_pedido = Decimal(str(itens_do_pedido["valor_exibicao"].sum())).quantize(
                         Decimal("0.01"), rounding=ROUND_HALF_UP
                     )
+                    extras_do_pedido = extras_tipo[
+                        extras_tipo["pedido_id"] == pedido_id
+                    ].copy() if len(extras_tipo) else extras_tipo.copy()
+                    subtotal_extras = Decimal(str(
+                        extras_do_pedido["valor"].sum() if len(extras_do_pedido) else 0
+                    )).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    total_documental_pedido = subtotal_pedido + subtotal_extras
                     solicitacoes = ", ".join(sorted(set(itens_do_pedido["solicitacao"].astype(str))))
                     status_pedido = ", ".join(
                         sorted(set(itens_do_pedido["status"].apply(normalizar_texto_portugues).astype(str)))
                     )
                     with st.expander(
-                        f"Pedido #{int(pedido_id)} — {format_currency_brl(subtotal_pedido)}",
+                        f"Pedido #{int(pedido_id)} — rubrica {format_currency_brl(subtotal_pedido)}"
+                        + (f" | documento {format_currency_brl(total_documental_pedido)}" if subtotal_extras else ""),
                         expanded=True,
                     ):
                         st.caption(f"Solicitação: {solicitacoes} | Status: {status_pedido}")
@@ -7337,10 +7389,34 @@ elif menu == "resumo_pedidos":
                         )
                         st.dataframe(tabela_itens, use_container_width=True, hide_index=True)
 
-                st.markdown(f"**TOTAL DE {rotulo_tipo.upper()}: {format_currency_brl(total_tipo)}**")
+                        if len(extras_do_pedido):
+                            st.markdown("**Valores extras — informativos, fora das rubricas**")
+                            tabela_extras = extras_do_pedido.rename(columns={
+                                "tipo": "Tipo",
+                                "descricao": "Descrição",
+                                "valor": "Valor extra",
+                                "nota_fiscal": "Nota fiscal",
+                                "responsavel_pagamento": "Responsável",
+                            })[["Tipo", "Descrição", "Valor extra", "Nota fiscal", "Responsável"]].copy()
+                            tabela_extras["Valor extra"] = tabela_extras["Valor extra"].apply(format_currency_brl)
+                            st.dataframe(tabela_extras, use_container_width=True, hide_index=True)
+                            st.caption(
+                                f"Total da rubrica: {format_currency_brl(subtotal_pedido)} | "
+                                f"Extras fora do projeto: {format_currency_brl(subtotal_extras)} | "
+                                f"Total documental: {format_currency_brl(total_documental_pedido)}"
+                            )
+
+                st.markdown(
+                    f"**TOTAL DE {rotulo_tipo.upper()}: {format_currency_brl(total_tipo)}**  "
+                    f"(extras fora das rubricas: {format_currency_brl(total_extras_tipo)})"
+                )
 
         st.divider()
-        st.markdown(f"## TOTAL GERAL: {format_currency_brl(total_geral_pedidos)}")
+        st.markdown(f"## TOTAL GERAL DAS RUBRICAS: {format_currency_brl(total_geral_pedidos)}")
+        st.caption(
+            f"Extras fora do projeto: {format_currency_brl(total_geral_extras)} | "
+            f"Total documental: {format_currency_brl(total_documental)}"
+        )
 
 elif menu == "destino_final":
     sincronizar_status_operacional()
