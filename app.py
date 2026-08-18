@@ -7665,6 +7665,8 @@ elif menu == "resumo_pedidos":
             mime="application/pdf",
             type="primary",
             use_container_width=True,
+            on_click="ignore",
+            help="Baixa o PDF sem reiniciar a página ou invalidar o arquivo temporário.",
             key="download_pdf_resumo_pedidos",
         )
         total_coluna, extras_coluna, documental_coluna, pedidos_coluna = st.columns(4)
