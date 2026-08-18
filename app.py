@@ -2067,6 +2067,284 @@ def construir_pdf_dados_adicionais_fornecedor(rubrica, tipos_itens=None) -> byte
     pdf.extend(f"trailer\n<< /Size {len(objetos) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode("ascii"))
     return bytes(pdf)
 
+def construir_pdf_resumo_pedidos(
+    itens_pedidos: pd.DataFrame,
+    valores_extras: pd.DataFrame,
+    orcamento_rubricas: pd.DataFrame,
+) -> bytes:
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        BaseDocTemplate,
+        Frame,
+        PageBreak,
+        PageTemplate,
+        Paragraph,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+
+    arquivo = BytesIO()
+    pagina = landscape(A4)
+    margem = 12 * mm
+    estilos = getSampleStyleSheet()
+    titulo = ParagraphStyle(
+        "TituloRelatorio",
+        parent=estilos["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=18,
+        leading=21,
+        textColor=colors.HexColor("#14532d"),
+        alignment=TA_CENTER,
+        spaceAfter=8,
+    )
+    secao = ParagraphStyle(
+        "SecaoRelatorio",
+        parent=estilos["Heading1"],
+        fontName="Helvetica-Bold",
+        fontSize=13,
+        leading=16,
+        textColor=colors.HexColor("#166534"),
+        spaceBefore=5,
+        spaceAfter=5,
+    )
+    pedido_estilo = ParagraphStyle(
+        "PedidoRelatorio",
+        parent=estilos["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=10,
+        leading=12,
+        textColor=colors.HexColor("#1f2937"),
+        spaceBefore=5,
+        spaceAfter=3,
+        keepWithNext=True,
+    )
+    pedido_continuacao = ParagraphStyle(
+        "PedidoContinuacaoRelatorio",
+        parent=pedido_estilo,
+        keepWithNext=False,
+    )
+    normal = ParagraphStyle(
+        "NormalRelatorio",
+        parent=estilos["BodyText"],
+        fontName="Helvetica",
+        fontSize=7.5,
+        leading=9,
+        alignment=TA_LEFT,
+    )
+    pequeno = ParagraphStyle(
+        "PequenoRelatorio",
+        parent=normal,
+        fontSize=6.5,
+        leading=8,
+        textColor=colors.HexColor("#4b5563"),
+    )
+
+    def texto(valor, estilo=normal):
+        valor_texto = str(valor if valor is not None else "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return Paragraph(valor_texto, estilo)
+
+    def tabela(dados, larguras, cabecalho=True, cor_cabecalho="#166534"):
+        tabela_pdf = Table(dados, colWidths=larguras, repeatRows=1 if cabecalho else 0, hAlign="LEFT")
+        comandos = [
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#cbd5e1")),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("ROWBACKGROUNDS", (0, 1 if cabecalho else 0), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+        ]
+        if cabecalho:
+            comandos.extend([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(cor_cabecalho)),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, 0), 7),
+            ])
+        tabela_pdf.setStyle(TableStyle(comandos))
+        return tabela_pdf
+
+    def rodape(canvas, documento):
+        canvas.saveState()
+        canvas.setStrokeColor(colors.HexColor("#d1d5db"))
+        canvas.line(margem, 9 * mm, pagina[0] - margem, 9 * mm)
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(colors.HexColor("#6b7280"))
+        canvas.drawString(margem, 5.5 * mm, f"Resumo de pedidos - gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+        canvas.drawRightString(pagina[0] - margem, 5.5 * mm, f"Página {documento.page}")
+        canvas.restoreState()
+
+    documento = BaseDocTemplate(
+        arquivo,
+        pagesize=pagina,
+        leftMargin=margem,
+        rightMargin=margem,
+        topMargin=12 * mm,
+        bottomMargin=13 * mm,
+        title="Resumo de pedidos e orçamento",
+        author="Projeto Hidrogênio Verde",
+    )
+    quadro = Frame(
+        documento.leftMargin,
+        documento.bottomMargin,
+        documento.width,
+        documento.height,
+        id="conteudo",
+    )
+    documento.addPageTemplates([PageTemplate(id="relatorio", frames=[quadro], onPage=rodape)])
+    elementos = [
+        Paragraph("RESUMO DE PEDIDOS E ORÇAMENTO", titulo),
+        Paragraph(
+            "Valores extras, como fretes e taxas bancárias, são exibidos separadamente e não reduzem as rubricas.",
+            pequeno,
+        ),
+        Spacer(1, 5),
+    ]
+
+    tipos = [
+        ("permanente", "MATERIAL PERMANENTE"),
+        ("consumo", "MATERIAL DE CONSUMO"),
+        ("servico", "SERVIÇO"),
+    ]
+    total_pedidos = Decimal("0")
+    total_extras = Decimal("0")
+    for indice_tipo, (tipo_item, rotulo) in enumerate(tipos):
+        if indice_tipo:
+            elementos.append(PageBreak())
+        itens_tipo = itens_pedidos[itens_pedidos["tipo_item"] == tipo_item].copy()
+        extras_tipo = valores_extras[valores_extras["tipo_item"] == tipo_item].copy() if len(valores_extras) else valores_extras.copy()
+        total_tipo = Decimal(str(itens_tipo["valor_exibicao"].sum() if len(itens_tipo) else 0)).quantize(Decimal("0.01"))
+        total_extra_tipo = Decimal(str(extras_tipo["valor"].sum() if len(extras_tipo) else 0)).quantize(Decimal("0.01"))
+        total_pedidos += total_tipo
+        total_extras += total_extra_tipo
+        elementos.append(Paragraph(rotulo, secao))
+        elementos.append(Paragraph(
+            f"Total nas rubricas: {format_currency_brl(total_tipo)} | Extras fora do projeto: {format_currency_brl(total_extra_tipo)} | Total documental: {format_currency_brl(total_tipo + total_extra_tipo)}",
+            normal,
+        ))
+        elementos.append(Spacer(1, 4))
+        if not len(itens_tipo):
+            elementos.append(Paragraph("Nenhum item registrado nesta categoria.", normal))
+            continue
+
+        for pedido_id, itens_do_pedido in itens_tipo.groupby("pedido_id", sort=True):
+            subtotal = Decimal(str(itens_do_pedido["valor_exibicao"].sum())).quantize(Decimal("0.01"))
+            extras_pedido = extras_tipo[extras_tipo["pedido_id"] == pedido_id].copy() if len(extras_tipo) else extras_tipo.copy()
+            subtotal_extra = Decimal(str(extras_pedido["valor"].sum() if len(extras_pedido) else 0)).quantize(Decimal("0.01"))
+            elementos.append(Paragraph(
+                f"Pedido #{int(pedido_id)} - Rubrica: {format_currency_brl(subtotal)} - Documento: {format_currency_brl(subtotal + subtotal_extra)}",
+                pedido_estilo,
+            ))
+            cabecalho_itens = ["Item", "Rubrica", "Qtd.", "Valor unitário", "Valor total", "Origem", "Nota fiscal"]
+            linhas_itens = []
+            for _, item in itens_do_pedido.iterrows():
+                linhas_itens.append([
+                    texto(item["descricao"]),
+                    texto(item["rubrica"], pequeno),
+                    texto(item["quantidade"], pequeno),
+                    texto(format_currency_brl(item["valor_unitario_exibicao"]), pequeno),
+                    texto(format_currency_brl(item["valor_exibicao"]), pequeno),
+                    texto(item["fonte_valor"], pequeno),
+                    texto(item["notas_fiscais"], pequeno),
+                ])
+            blocos_itens = [linhas_itens[inicio:inicio + 18] for inicio in range(0, len(linhas_itens), 18)]
+            for indice_bloco, bloco in enumerate(blocos_itens):
+                if indice_bloco:
+                    elementos.append(PageBreak())
+                    elementos.append(Paragraph(f"Pedido #{int(pedido_id)} - continuação", pedido_continuacao))
+                linhas = [cabecalho_itens] + bloco
+                if indice_bloco == len(blocos_itens) - 1:
+                    linhas.append([
+                        texto("TOTAL DO PEDIDO", pedido_estilo), "", "", "",
+                        texto(format_currency_brl(subtotal), pedido_estilo), "", "",
+                    ])
+                elementos.append(tabela(linhas, [91 * mm, 18 * mm, 13 * mm, 25 * mm, 25 * mm, 29 * mm, 30 * mm]))
+            if len(extras_pedido):
+                elementos.append(Spacer(1, 3))
+                linhas_extras = [["Extra fora do projeto", "Descrição", "Valor", "Nota fiscal", "Responsável"]]
+                for _, extra in extras_pedido.iterrows():
+                    linhas_extras.append([
+                        texto(extra["tipo"]),
+                        texto(extra["descricao"]),
+                        texto(format_currency_brl(extra["valor"]), pequeno),
+                        texto(extra["nota_fiscal"], pequeno),
+                        texto(extra["responsavel_pagamento"], pequeno),
+                    ])
+                elementos.append(tabela(linhas_extras, [35 * mm, 100 * mm, 27 * mm, 28 * mm, 41 * mm], cor_cabecalho="#92400e"))
+            elementos.append(Spacer(1, 5))
+
+    elementos.extend([
+        PageBreak(),
+        Paragraph("CONSOLIDAÇÃO ORÇAMENTÁRIA", secao),
+        Paragraph(
+            "O saldo disponível é calculado sem deduzir os extras fora do projeto.",
+            pequeno,
+        ),
+        Spacer(1, 5),
+    ])
+    linhas_rubricas = [["Código", "Rubrica", "Categoria", "Valor orçado", "Valor utilizado", "Extras", "Saldo disponível"]]
+    for _, rubrica in orcamento_rubricas.iterrows():
+        linhas_rubricas.append([
+            texto(rubrica["codigo"], pequeno),
+            texto(rubrica["nome"]),
+            texto(rubrica["categoria"], pequeno),
+            texto(format_currency_brl(rubrica["valor_orcado"]), pequeno),
+            texto(format_currency_brl(rubrica["valor_utilizado"]), pequeno),
+            texto(format_currency_brl(rubrica["valor_extras"]), pequeno),
+            texto(format_currency_brl(rubrica["saldo_disponivel"]), pequeno),
+        ])
+    elementos.append(tabela(linhas_rubricas, [18 * mm, 78 * mm, 35 * mm, 28 * mm, 28 * mm, 22 * mm, 29 * mm]))
+    elementos.append(Spacer(1, 9))
+
+    resumo_categoria = (
+        orcamento_rubricas.groupby("categoria", as_index=False)
+        .agg(
+            valor_orcado=("valor_orcado", "sum"),
+            valor_utilizado=("valor_utilizado", "sum"),
+            valor_extras=("valor_extras", "sum"),
+            saldo_disponivel=("saldo_disponivel", "sum"),
+        )
+    )
+    linhas_categorias = [["Categoria", "Valor orçado", "Valor utilizado", "Extras", "Total documental", "Saldo disponível"]]
+    for _, categoria in resumo_categoria.iterrows():
+        documental = Decimal(str(categoria["valor_utilizado"])) + Decimal(str(categoria["valor_extras"]))
+        linhas_categorias.append([
+            texto(categoria["categoria"]),
+            texto(format_currency_brl(categoria["valor_orcado"]), pequeno),
+            texto(format_currency_brl(categoria["valor_utilizado"]), pequeno),
+            texto(format_currency_brl(categoria["valor_extras"]), pequeno),
+            texto(format_currency_brl(documental), pequeno),
+            texto(format_currency_brl(categoria["saldo_disponivel"]), pequeno),
+        ])
+    totais = {
+        coluna: Decimal(str(orcamento_rubricas[coluna].sum())).quantize(Decimal("0.01"))
+        for coluna in ["valor_orcado", "valor_utilizado", "valor_extras", "saldo_disponivel"]
+    }
+    linhas_categorias.append([
+        texto("TOTAL GERAL", pedido_estilo),
+        texto(format_currency_brl(totais["valor_orcado"]), pedido_estilo),
+        texto(format_currency_brl(totais["valor_utilizado"]), pedido_estilo),
+        texto(format_currency_brl(totais["valor_extras"]), pedido_estilo),
+        texto(format_currency_brl(totais["valor_utilizado"] + totais["valor_extras"]), pedido_estilo),
+        texto(format_currency_brl(totais["saldo_disponivel"]), pedido_estilo),
+    ])
+    elementos.append(Paragraph("Resumo por categoria e total geral", secao))
+    elementos.append(tabela(linhas_categorias, [55 * mm, 34 * mm, 34 * mm, 28 * mm, 36 * mm, 36 * mm]))
+    elementos.append(Spacer(1, 8))
+    elementos.append(Paragraph(
+        f"Conferência dos pedidos: rubricas {format_currency_brl(total_pedidos)}, extras {format_currency_brl(total_extras)}, total documental {format_currency_brl(total_pedidos + total_extras)}.",
+        normal,
+    ))
+
+    documento.build(elementos)
+    arquivo.seek(0)
+    return arquivo.getvalue()
+
 COLUNAS_AUDITORIA = {
     "pedido_item_id": "Item do pedido (ID)",
     "compra_id": "Compra",
@@ -7329,6 +7607,37 @@ elif menu == "resumo_pedidos":
     where s.status <> 'cancelado'
     order by pedido_id, v.criado_em, v.id
     """)
+    orcamento_pdf = query("""
+    select
+      r.codigo,
+      r.nome,
+      case
+        when r.tipo::text = 'material_permanente' then 'Material permanente'
+        when r.tipo::text = 'material_consumo' then 'Material de consumo'
+        when r.tipo::text = 'servico_pf' then 'Serviço'
+        else 'Outros'
+      end as categoria,
+      v.valor_orcado,
+      v.valor_utilizado,
+      coalesce(x.valor_extras, 0) as valor_extras,
+      greatest(v.saldo_disponivel, 0) as saldo_disponivel
+    from vw_orcamento v
+    join rubricas r on r.id = v.id
+    left join (
+      select rubrica_id, sum(valor) as valor_extras
+      from valores_extra_nao_debitados
+      where rubrica_id is not null
+      group by rubrica_id
+    ) x on x.rubrica_id = r.id
+    order by
+      case r.tipo::text
+        when 'material_permanente' then 1
+        when 'material_consumo' then 2
+        when 'servico_pf' then 3
+        else 4
+      end,
+      r.codigo
+    """)
 
     if len(itens_pedidos) == 0:
         st.info("Nenhum pedido com itens foi encontrado.")
@@ -7345,6 +7654,19 @@ elif menu == "resumo_pedidos":
             valores_extras_pedidos["valor"].sum() if len(valores_extras_pedidos) else 0
         )).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         total_documental = total_geral_pedidos + total_geral_extras
+        st.download_button(
+            "Gerar PDF do resumo de pedidos",
+            data=construir_pdf_resumo_pedidos(
+                itens_pedidos,
+                valores_extras_pedidos,
+                orcamento_pdf,
+            ),
+            file_name=f"resumo_pedidos_orcamento_{date.today().isoformat()}.pdf",
+            mime="application/pdf",
+            type="primary",
+            use_container_width=True,
+            key="download_pdf_resumo_pedidos",
+        )
         total_coluna, extras_coluna, documental_coluna, pedidos_coluna = st.columns(4)
         total_coluna.metric("Total das rubricas", format_currency_brl(total_geral_pedidos))
         extras_coluna.metric("Extras fora do projeto", format_currency_brl(total_geral_extras))

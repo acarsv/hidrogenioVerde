@@ -5,6 +5,7 @@ pandas
 bcrypt
 python-dotenv
 openpyxl
+reportlab
 google-api-python-client
 google-auth
 google-auth-httplib2
